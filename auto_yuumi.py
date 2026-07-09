@@ -200,7 +200,7 @@ def visual_monitor_thread():
                     thresh_lvl = cv2.copyMakeBorder(thresh_lvl, 10, 10, 10, 10, cv2.BORDER_CONSTANT,
                                                     value=[255, 255, 255])
                     # 使用中值滤波(Median Blur)平滑图像，专门抹除孤立的微小噪点
-                    thresh_lvl = cv2.medianBlur(thresh_lvl, 3)
+                    thresh_lvl = cv2.medianBlur(thresh_lvl, 11)
                     # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
                     cv2.imwrite('debug_ocr_level.png', thresh_lvl)
 
@@ -212,6 +212,7 @@ def visual_monitor_thread():
                         if 0 < read_level <= 18:
                             if game_state['current_level'] == 0:
                                 print(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
+                                time.sleep(2)
                                 # ================= 动态亮度校准 =================
                                 w_img_calib = np.array(sct.grab(w_region))
                                 w_base_now = np.mean(cv2.cvtColor(w_img_calib, cv2.COLOR_BGRA2GRAY))
