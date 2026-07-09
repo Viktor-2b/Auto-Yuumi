@@ -71,7 +71,9 @@ game_state = {
     # 记录商店购买状态，防止在泉水里无限买东西
     'has_shopped_this_visit': False,
     # 记录紧急救援技能的上一次释放时间
-    'last_cast': {'e': 0.0, 'space': 0.0}
+    'last_cast': {'e': 0.0, 'space': 0.0},
+    # 记录屏幕亮度动态缩放比例
+    'brightness_ratio': 1.0
 }
 
 # 如果 condition == 'low_health'，则不仅要等冷却，还要等队友残血才会放。
@@ -148,16 +150,16 @@ def level_up_skill(target_level):
 
 
 def visual_monitor_thread():
-    w_attach_threshold = 122.0
-    # 血条变黑阈值
-    health_black_threshold = 100.0
-    # 商店高亮阈值
-    shop_bright_threshold = 85.0
+    # 动态校准常量基准 (基于本机环境)
+    base_w_normal = 112.12
+    base_w_attach = 122.0
+    base_health_black = 100.0
+    base_shop_bright = 85.0
 
     last_print_time = 0.0
 
     # 队友血条的相对X坐标中心点列表
-    TEAMMATE_X_LIST = [840, 894, 945, 996]
+    teammate_x_list = [840, 894, 945, 996]
 
     while True:
         if game_state['is_running'] and game_state['window_moved']:
@@ -191,17 +193,18 @@ def visual_monitor_thread():
                     gray_lvl = cv2.cvtColor(level_img, cv2.COLOR_BGRA2GRAY)
                     enlarged_lvl = cv2.resize(gray_lvl, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
 
-                    # 恢复: 放弃 OTSU，退回固定的 150 阈值。极小区域的 UI 截图不适合自动阈值
+                    # 固定的 150 阈值。极小区域的 UI 截图不适合自动阈值
                     _, thresh_lvl = cv2.threshold(enlarged_lvl, 150, 255, cv2.THRESH_BINARY_INV)
 
-                    # 保留: 继续添加白色边框 Padding。这正是解决 11 级贴边被当成噪点过滤的核心办法
+                    # 继续添加白色边框 Padding。这正是解决 11 级贴边被当成噪点过滤的核心办法
                     thresh_lvl = cv2.copyMakeBorder(thresh_lvl, 10, 10, 10, 10, cv2.BORDER_CONSTANT,
                                                     value=[255, 255, 255])
-
+                    # 使用中值滤波(Median Blur)平滑图像，专门抹除孤立的微小噪点
+                    thresh_lvl = cv2.medianBlur(thresh_lvl, 3)
                     # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
                     cv2.imwrite('debug_ocr_level.png', thresh_lvl)
 
-                    custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789'
+                    custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789'
                     level_text = pytesseract.image_to_string(thresh_lvl, config=custom_config).strip()
 
                     if level_text.isdigit():
@@ -209,7 +212,19 @@ def visual_monitor_thread():
                         if 0 < read_level <= 18:
                             if game_state['current_level'] == 0:
                                 print(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
+                                # ================= 动态亮度校准 =================
+                                w_img_calib = np.array(sct.grab(w_region))
+                                w_base_now = np.mean(cv2.cvtColor(w_img_calib, cv2.COLOR_BGRA2GRAY))
 
+                                # 防止异常黑屏导致除以0。如果你是在附身状态下重启脚本(亮度约131)，这里给个警告
+                                if w_base_now < 10.0: w_base_now = base_w_normal
+                                game_state['brightness_ratio'] = w_base_now / base_w_normal
+
+                                print(
+                                    f"🔆 屏幕亮度校准完成！W技能基准: {w_base_now:.2f} (适应比例: {game_state['brightness_ratio']:.2f})")
+                                if w_base_now > 125.0:
+                                    print(
+                                        "⚠️ [警告] 初始亮度偏高，若您是在附身状态下启动的脚本，校准可能会产生偏差！建议下车后重启脚本。")
                                 # 在真正进入游戏地图时，将时间锚点重置。
                                 # 否则，几分钟的加载界面时长会被提前算入全局推移时间里，导致技能CD逻辑错乱。
                                 game_state['start_time'] = time.time()
@@ -256,7 +271,7 @@ def visual_monitor_thread():
                         shop_gray = cv2.cvtColor(shop_img, cv2.COLOR_BGRA2GRAY)
                         shop_mean = np.mean(shop_gray)
 
-                        is_in_base = shop_mean > shop_bright_threshold
+                        is_in_base = shop_mean > (base_shop_bright * game_state['brightness_ratio'])
 
                         if is_in_base:
                             if not game_state['has_shopped_this_visit']:
@@ -290,7 +305,7 @@ def visual_monitor_thread():
                         shift_x = int(10 * (1.0 - ratio))
 
                         # 原始X中心加上偏移量，提前探测掉血(约3/4血阈值)
-                        hp_center_x = client_point[0] + TEAMMATE_X_LIST[current_teammate_idx] + shift_x
+                        hp_center_x = client_point[0] + teammate_x_list[current_teammate_idx] + shift_x
                         # Y 轴取528中心，高度6
                         # X 轴取中心点左右各 5 像素 (width=10)，组成一个探测框
                         health_region = {
@@ -305,7 +320,8 @@ def visual_monitor_thread():
                         hp_mean = np.mean(hp_gray)
 
                         # 只有当这个区域变成暗黑，才判定为残血（掉血超过一半经过了中心点）
-                        game_state['teammate_low_health'] = hp_mean < health_black_threshold
+                        game_state['teammate_low_health'] = hp_mean < (
+                                    base_health_black * game_state['brightness_ratio'])
 
                         # ================= 紧急技能释放 (E & Space) =================
                         # 如果没有被暂停，且队友残血，立即进行CD判定并释放
@@ -335,7 +351,7 @@ def visual_monitor_thread():
                         w_mean_brightness = np.mean(w_gray)
 
                         current_time = time.time()
-                        is_attached = w_mean_brightness > w_attach_threshold
+                        is_attached = w_mean_brightness > (base_w_attach * game_state['brightness_ratio'])
 
                         if current_time - last_print_time > 5.0:
                             state_str = "附身中" if is_attached else "未附身"
