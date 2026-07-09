@@ -193,7 +193,14 @@ def visual_monitor_thread():
                     gray_lvl = cv2.cvtColor(level_img, cv2.COLOR_BGRA2GRAY)
                     enlarged_lvl = cv2.resize(gray_lvl, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
 
-                    # 固定的 150 阈值。极小区域的 UI 截图不适合自动阈值
+                    # 圆环掩码：创建一个纯黑背景，中间画一个白圆，只保留圆形区域内的图像，抹除四个角的边框残影
+                    mask = np.zeros(enlarged_lvl.shape, dtype=np.uint8)
+                    center_x, center_y = enlarged_lvl.shape[1] // 2, enlarged_lvl.shape[0] // 2
+                    # 半径设为 28 (原图13*5=65，中心点32，半径28刚好能切掉四个角的边框)
+                    cv2.circle(mask, (center_x, center_y), 28, 255, -1)
+                    enlarged_lvl = cv2.bitwise_and(enlarged_lvl, enlarged_lvl, mask=mask)
+
+                    # 放弃 OTSU，退回固定的 150 阈值。极小区域的 UI 截图不适合自动阈值
                     _, thresh_lvl = cv2.threshold(enlarged_lvl, 150, 255, cv2.THRESH_BINARY_INV)
 
                     # 继续添加白色边框 Padding。这正是解决 11 级贴边被当成噪点过滤的核心办法
@@ -204,6 +211,14 @@ def visual_monitor_thread():
                     # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
                     cv2.imwrite('debug_ocr_level.png', thresh_lvl)
 
+                    # 如果等级框全白（二值化反转后全白，说明原图UI消失了），说明游戏退出了结算
+                    if game_state['current_level'] > 0 and np.mean(thresh_lvl) >= 250.0:
+                        print(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到等级框全白，游戏结束，点击屏幕中心退出！")
+                        pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
+                        time.sleep(0.1)
+                        pydirectinput.click()
+                        time.sleep(1.5)  # 休眠一会，避免疯狂连点
+
                     custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789'
                     level_text = pytesseract.image_to_string(thresh_lvl, config=custom_config).strip()
 
@@ -212,7 +227,7 @@ def visual_monitor_thread():
                         if 0 < read_level <= 18:
                             if game_state['current_level'] == 0:
                                 print(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
-                                time.sleep(2)
+                                time.sleep(3.0)
                                 # ================= 动态亮度校准 =================
                                 w_img_calib = np.array(sct.grab(w_region))
                                 w_base_now = np.mean(cv2.cvtColor(w_img_calib, cv2.COLOR_BGRA2GRAY))
@@ -546,11 +561,44 @@ def main_controller():
                 if move_window_to_top_right():
                     game_state['window_moved'] = True
 
+
             elif not running and game_state['is_running']:
                 game_state['is_running'] = False
                 game_state['start_time'] = None
                 game_state['window_moved'] = False
                 print(f"\n[{time.strftime('%H:%M:%S')}] 🛑 游戏结束...")
+
+                # 寻找游戏大厅窗口，移动至右上角并双击底部
+                time.sleep(3.0)  # 给大厅一点弹出的缓冲时间
+                lobby_hwnd = win32gui.FindWindow(None, "League of Legends")
+                if lobby_hwnd:
+                    screen_w = ctypes.windll.user32.GetSystemMetrics(0)
+                    rect = win32gui.GetWindowRect(lobby_hwnd)
+                    win_w = rect[2] - rect[0]
+                    win_h = rect[3] - rect[1]
+                    new_x = screen_w - win_w
+                    new_y = 0
+
+                    # 1. 移动大厅到右上角
+                    win32gui.SetWindowPos(lobby_hwnd, win32con.HWND_TOP, new_x, new_y, win_w, win_h,
+                                          win32con.SWP_SHOWWINDOW)
+
+                    print(f"🪟 已将游戏大厅移动至右上角: ({new_x}, {new_y})")
+                    # 2. 移动鼠标到大厅底部正中间并双击，触发 LeagueAkari 所需的重新匹配
+
+                    # Y轴偏移减去 40 像素，确保点在“再来一局”等底部按钮区域上
+                    target_x = new_x + win_w // 2
+                    target_y = win_h - 40
+                    time.sleep(1.0)  # 窗口移动后稍微等一下
+                    pydirectinput.moveTo(target_x, target_y)
+                    time.sleep(0.5)
+                    pydirectinput.click()
+                    time.sleep(0.5)
+                    pydirectinput.click()
+                    time.sleep(0.5)
+                    pydirectinput.click()
+
+                    print("🖱️ 已点击大厅底部中央，准备衔接 LeagueAkari 自动匹配！")
 
             time.sleep(2.0)
 
