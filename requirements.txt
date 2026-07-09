@@ -1,0 +1,15 @@
+# 基础视觉与矩阵运算
+opencv-python   # 对应 import cv2
+numpy           # 对应 import numpy
+
+# 极速截图与 OCR 识别
+mss             # 对应 from mss import mss
+pytesseract     # 对应 import pytesseract
+
+# Windows 窗口与底层交互
+pywin32         # 对应 import win32gui, win32con
+psutil          # 对应 import psutil (用于遍历游戏进程)
+
+# 键鼠模拟与监听
+keyboard        # 对应 import keyboard
+pydirectinput   # 对应 import pydirectinput (DirectX 级按键)
