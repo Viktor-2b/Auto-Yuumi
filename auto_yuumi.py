@@ -198,6 +198,9 @@ def visual_monitor_thread():
                     thresh_lvl = cv2.copyMakeBorder(thresh_lvl, 10, 10, 10, 10, cv2.BORDER_CONSTANT,
                                                     value=[255, 255, 255])
 
+                    # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
+                    cv2.imwrite('debug_ocr_level.png', thresh_lvl)
+
                     custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789'
                     level_text = pytesseract.image_to_string(thresh_lvl, config=custom_config).strip()
 
@@ -233,6 +236,12 @@ def visual_monitor_thread():
                                 time.sleep(0.05)
                                 pydirectinput.mouseUp()
                                 print("🎯 已自动点击分路任务 (辅助位置)")
+
+                                # 默认跟随右边第一个队友
+                                game_state['attached_teammate_index'] = 0
+                                game_state['attach_x'] = client_point[0] + 840
+                                game_state['attach_y'] = client_point[1] + 505
+                                print("🎯 已设置默认跟随：右边第一个队友 (脚本将自动触发附身)")
 
                                 game_state['current_level'] = read_level
                                 level_up_skill(read_level)
