@@ -81,7 +81,7 @@ ACTION_CONFIG = {
     'w': {'key': 'w', 'start': 25.0, 'end': 5.0, 'delay': 0.0, 'condition': 'none'},
     'd': {'key': 'd', 'start': 20.0, 'end': 3.0, 'delay': 0.0, 'condition': 'none'},
     # 加血类 设置为残血才放
-    'space': {'key': 'space', 'start': 200.0, 'end': 100.0, 'delay': 480.0, 'condition': 'low_health'},
+    'space': {'key': 'space', 'start': 150.0, 'end': 60.0, 'delay': 480.0, 'condition': 'low_health'},
     'e': {'key': 'e', 'start': 200.0, 'end': 60.0, 'delay': 180.0, 'condition': 'low_health'},
 
     'right_click': {'key': 'right_click', 'start': 9.0, 'end': 9.0, 'delay': 0.0, 'condition': 'none'},
@@ -183,7 +183,7 @@ def visual_monitor_thread():
                 shop_region = {
                     'top': client_point[1] + 746,
                     'left': client_point[0] + 611,
-                    'width': 83,
+                    'width': 20,
                     'height': 16
                 }
 
@@ -197,17 +197,19 @@ def visual_monitor_thread():
                     mask = np.zeros(enlarged_lvl.shape, dtype=np.uint8)
                     center_x, center_y = enlarged_lvl.shape[1] // 2, enlarged_lvl.shape[0] // 2
                     # 半径设为 28 (原图13*5=65，中心点32，半径28刚好能切掉四个角的边框)
-                    cv2.circle(mask, (center_x, center_y), 28, 255, -1)
+                    cv2.circle(mask, (center_x, center_y), 35, 255, -1)
                     enlarged_lvl = cv2.bitwise_and(enlarged_lvl, enlarged_lvl, mask=mask)
 
-                    # 放弃 OTSU，退回固定的 150 阈值。极小区域的 UI 截图不适合自动阈值
-                    _, thresh_lvl = cv2.threshold(enlarged_lvl, 150, 255, cv2.THRESH_BINARY_INV)
+                    # y在二值化前加入 3x3 的高斯模糊，彻底消除放大带来的锯齿，让数字边缘如德芙般顺滑
+                    enlarged_lvl = cv2.GaussianBlur(enlarged_lvl, (3, 3), 0)
+
+                    # 【优化】移除粗暴的 dilate 操作，将阈值从 150 提升到 165。
+                    # 阈值越高，画面中被判定为黑字的像素就越少，数字自然就变细了，完美保留字体圆弧形状且剥离粘连！
+                    _, thresh_lvl = cv2.threshold(enlarged_lvl, 165, 255, cv2.THRESH_BINARY_INV)
 
                     # 继续添加白色边框 Padding。这正是解决 11 级贴边被当成噪点过滤的核心办法
                     thresh_lvl = cv2.copyMakeBorder(thresh_lvl, 10, 10, 10, 10, cv2.BORDER_CONSTANT,
                                                     value=[255, 255, 255])
-                    # 使用中值滤波(Median Blur)平滑图像，专门抹除孤立的微小噪点
-                    thresh_lvl = cv2.medianBlur(thresh_lvl, 11)
                     # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
                     cv2.imwrite('debug_ocr_level.png', thresh_lvl)
 
@@ -218,6 +220,9 @@ def visual_monitor_thread():
                         time.sleep(0.1)
                         pydirectinput.click()
                         time.sleep(1.5)  # 休眠一会，避免疯狂连点
+                        game_state['current_level'] = 0  # 🐛修复：归零等级，切断当前及后续所有附身/商城的视觉计算
+                        game_state['is_paused'] = True  # 🐛修复：全局挂起，彻底冻结所有 action_worker 动作线程
+                        continue # 退出视觉循环
 
                     custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789'
                     level_text = pytesseract.image_to_string(thresh_lvl, config=custom_config).strip()
@@ -227,7 +232,7 @@ def visual_monitor_thread():
                         if 0 < read_level <= 18:
                             if game_state['current_level'] == 0:
                                 print(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
-                                time.sleep(3.0)
+                                time.sleep(10.0)
                                 # ================= 动态亮度校准 =================
                                 w_img_calib = np.array(sct.grab(w_region))
                                 w_base_now = np.mean(cv2.cvtColor(w_img_calib, cv2.COLOR_BGRA2GRAY))
@@ -238,7 +243,7 @@ def visual_monitor_thread():
 
                                 print(
                                     f"🔆 屏幕亮度校准完成！W技能基准: {w_base_now:.2f} (适应比例: {game_state['brightness_ratio']:.2f})")
-                                if w_base_now > 125.0:
+                                if w_base_now > 180.0:
                                     print(
                                         "⚠️ [警告] 初始亮度偏高，若您是在附身状态下启动的脚本，校准可能会产生偏差！建议下车后重启脚本。")
                                 # 在真正进入游戏地图时，将时间锚点重置。
@@ -281,10 +286,11 @@ def visual_monitor_thread():
                                 game_state['current_level'] = read_level
                                 level_up_skill(read_level)
 
-                    if game_state['current_level'] > 0:
+                    if game_state['current_level'] > 0 and game_state['start_time'] is not None:
                         # ================= 商城回城状态处理 =================
                         shop_img = np.array(sct.grab(shop_region))
                         shop_gray = cv2.cvtColor(shop_img, cv2.COLOR_BGRA2GRAY)
+                        cv2.imwrite('debug_ocr_shop.png', shop_gray)
                         shop_mean = np.mean(shop_gray)
 
                         is_in_base = shop_mean > (base_shop_bright * game_state['brightness_ratio'])
@@ -299,9 +305,11 @@ def visual_monitor_thread():
 
                                 pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
                                 time.sleep(0.1)
-                                pydirectinput.mouseDown(button='right')
-                                time.sleep(0.05)
-                                pydirectinput.mouseUp(button='right')
+                                for i in range(2):
+                                    pydirectinput.mouseDown(button='right')
+                                    time.sleep(0.05)
+                                    pydirectinput.mouseUp(button='right')
+                                    time.sleep(0.5)
                                 print("💰 装备购买完成")
                                 time.sleep(0.2)
 
@@ -318,9 +326,9 @@ def visual_monitor_thread():
                         # 计算随时间递减的X轴偏移量 (从 10 递减到 0)
                         t_elapsed = time.time() - game_state['start_time']
                         ratio = min(1.0, t_elapsed / TRANSITION_TIME)
-                        shift_x = int(10 * (1.0 - ratio))
+                        shift_x = int(10 - 20 * ratio)
 
-                        # 原始X中心加上偏移量，提前探测掉血(约3/4血阈值)
+                        # 原始X中心加上偏移量，提前探测掉血
                         hp_center_x = client_point[0] + teammate_x_list[current_teammate_idx] + shift_x
                         # Y 轴取528中心，高度6
                         # X 轴取中心点左右各 5 像素 (width=10)，组成一个探测框
@@ -333,6 +341,7 @@ def visual_monitor_thread():
 
                         hp_img = np.array(sct.grab(health_region))
                         hp_gray = cv2.cvtColor(hp_img, cv2.COLOR_BGRA2GRAY)
+                        cv2.imwrite('debug_ocr_hp.png', hp_gray)
                         hp_mean = np.mean(hp_gray)
 
                         # 只有当这个区域变成暗黑，才判定为残血（掉血超过一半经过了中心点）
@@ -353,8 +362,8 @@ def visual_monitor_thread():
                                 game_state['last_cast']['e'] = current_time
                                 time.sleep(0.1)
 
-                            # Space 技能动态冷却 (200秒 -> 100秒)
-                            space_cd = max(100.0, 200.0 - ((200.0 - 100.0) / TRANSITION_TIME) * elapsed)
+                            # Space 技能动态冷却 (150秒 -> 60秒)
+                            space_cd = max(100.0, 150.0 - ((150.0 - 60.0) / TRANSITION_TIME) * elapsed)
                             if current_time - game_state['last_cast']['space'] >= space_cd:
                                 pydirectinput.press('space')
                                 print(
@@ -364,6 +373,7 @@ def visual_monitor_thread():
                         # ---- W 技能图标状态处理 ----
                         w_img = np.array(sct.grab(w_region))
                         w_gray = cv2.cvtColor(w_img, cv2.COLOR_BGRA2GRAY)
+                        cv2.imwrite('debug_ocr_w.png', w_gray)
                         w_mean_brightness = np.mean(w_gray)
 
                         current_time = time.time()
@@ -585,18 +595,15 @@ def main_controller():
 
                     print(f"🪟 已将游戏大厅移动至右上角: ({new_x}, {new_y})")
                     # 2. 移动鼠标到大厅底部正中间并双击，触发 LeagueAkari 所需的重新匹配
-
+                    time.sleep(35.0)
                     # Y轴偏移减去 40 像素，确保点在“再来一局”等底部按钮区域上
-                    target_x = new_x + win_w // 2
+                    target_x = new_x + win_w // 2 - 100
                     target_y = win_h - 40
                     time.sleep(1.0)  # 窗口移动后稍微等一下
                     pydirectinput.moveTo(target_x, target_y)
-                    time.sleep(0.5)
-                    pydirectinput.click()
-                    time.sleep(0.5)
-                    pydirectinput.click()
-                    time.sleep(0.5)
-                    pydirectinput.click()
+                    for i in range(5):
+                        time.sleep(2.5)
+                        pydirectinput.click()
 
                     print("🖱️ 已点击大厅底部中央，准备衔接 LeagueAkari 自动匹配！")
 
