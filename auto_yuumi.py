@@ -1,54 +1,81 @@
+import os
 import time
-import psutil
-import pydirectinput
+import math
 import random
 import ctypes
 import threading
+
+import psutil
+import pydirectinput
+import keyboard
 import win32gui
 import win32con
-import keyboard
 import cv2
 import numpy as np
 import mss
 import pytesseract
-import math
 
 # ==========================================
 # 强制开启 Windows DPI 感知
 # ==========================================
 try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
+    # noinspection PyUnresolvedReferences
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # 适用于 Windows 8.1 及以上
+except (AttributeError, OSError):
     try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
+        # noinspection PyUnresolvedReferences
+        ctypes.windll.user32.SetProcessDPIAware()   # 适用于 Windows Vista 及以上
+    except (AttributeError, OSError):
         pass
 
 # ==========================================
 # 环境与全局配置
 # ==========================================
+os.makedirs("debug", exist_ok=True)
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 TARGET_PROCESS_NAME = "League of Legends.exe"
 WINDOW_NAME = "League of Legends (TM) Client"
 TRANSITION_TIME = 1600.0
 
-SKILL_UPGRADE_ORDER = ['d', 'w', 'd', 'a', 'd', 'space', 'd', 'a', 'd', 'a', 'space', 'a', 'w', 'w', 'w', 'space', 'w',
-                       'w']
-
-DISPLAY_NAMES = {
-    'w': 'Q技能',
-    'a': 'W技能',
-    'd': 'E技能',
-    'space': 'R技能',
-    'f': '辅助眼',
-    '4': '饰品眼',
-    'right_click': '移动',
-    'q': '虚弱',
-    'e': '治疗',
+# 键位绑定
+KEY_BINDINGS = {
+    'Q': 'w',               # Q技能摸鱼飞弹
+    'W': 'a',               # W技能附身
+    'E': 'd',               # E技能加盾
+    'R': 'space',           # R技能加血
+    'SUMMONER_EXHAUST': 'q',# 召唤师技能1：虚弱
+    'SUMMONER_HEAL': 'e',   # 召唤师技能2：治疗
+    'WARD_AUX_EQUIP': 'f',  # 装备栏1：辅助装眼位
+    'WARD_ACCESSORY': '4',  # 饰品眼位
+    'MOVE': 'right_click'   # 移动指令
 }
-
-game_state = {
+# 加点顺序
+SKILL_UPGRADE_ORDER = ['E', 'Q', 'E', 'W', 'E', 'R', 'E', 'W', 'E', 'W', 'R', 'W', 'Q', 'Q', 'Q', 'R', 'Q', 'Q']
+# 按键名称显示
+DISPLAY_NAMES = {
+    'Q': 'Q技能 摸鱼飞弹',
+    'W': 'W技能 悠米出动',
+    'E': 'E技能 旺盛精力',
+    'R': 'R技能 魔典终章',
+    'WARD_AUX_EQUIP': '辅助眼',
+    'WARD_ACCESSORY': '饰品眼',
+    'MOVE': '移动指令',
+    'SUMMONER_EXHAUST': '虚弱',
+    'SUMMONER_HEAL': '治疗',
+}
+# 键位循环配置
+ACTION_CONFIG: dict = {
+    'Q': {'start': 35.0, 'end': 5.0, 'delay': 0.0, 'condition': 'none', 'radius': [300, 450]},
+    'E': {'start': 20.0, 'end': 3.0, 'delay': 0.0, 'condition': 'none', 'radius': [0, 10]},
+    'R': {'start': 150.0, 'end': 60.0, 'delay': 480.0, 'condition': 'low_health', 'radius': [50, 150]},
+    'SUMMONER_HEAL': {'start': 200.0, 'end': 60.0, 'delay': 180.0, 'condition': 'low_health', 'radius': [0, 10]},
+    'SUMMONER_EXHAUST': {'start': 20.0, 'end': 5.0, 'delay': 0.0, 'condition': 'none', 'radius': [50, 150]},
+    'MOVE': {'start': 9.0, 'end': 9.0, 'delay': 0.0, 'condition': 'none', 'radius': [50, 100]},
+    'WARD_AUX_EQUIP': {'start': 50.0, 'end': 30.0, 'delay': 300.0, 'condition': 'none', 'radius': [60, 120]},
+    'WARD_ACCESSORY': {'start': 100.0, 'end': 50.0, 'delay': 120.0, 'condition': 'none', 'radius': [60, 120]},
+}
+game_state: dict = {
     'is_running': False,
     'start_time': None,
     'is_paused': False,
@@ -58,8 +85,8 @@ game_state = {
     'attach_y': None,
     'last_auto_attach_time': 0.0,
 
-    # 判断是否是脚本自己在按A
-    'is_simulating_a': False,
+    # 判断是否是脚本自己在模拟附身按键
+    'is_simulating_attach': False,
     # 队友是否残血标志
     'teammate_low_health': False,
     # 屏幕客户区中心坐标
@@ -70,27 +97,16 @@ game_state = {
     'attached_teammate_index': 0,
     # 记录商店购买状态，防止在泉水里无限买东西
     'has_shopped_this_visit': False,
-'last_shop_time': 0.0,  # 记录上一次成功购买的时间戳
-    # 记录紧急救援技能的上一次释放时间
-    'last_cast': {'e': 0.0, 'space': 0.0},
+    'last_shop_time': 0.0,  # 记录上一次成功购买的时间戳
+    # 记录紧急救援技能上一次释放时间
+    'last_cast': {'SUMMONER_HEAL': 0.0, 'R': 0.0},
     # 记录屏幕亮度动态缩放比例
-    'brightness_ratio': 1.0
+    'brightness_ratio': 1.0,
+    # 记录野外意外脱落后，按下B键回城的时间
+    'last_recall_time': 0.0,
+    # 记录玩家真实按下A键的时间，防止手动换乘时被误判为掉落
+    'last_manual_attach_time': 0.0
 }
-
-# 如果 condition == 'low_health'，则不仅要等冷却，还要等队友残血才会放。
-ACTION_CONFIG = {
-    'w': {'key': 'w', 'start': 25.0, 'end': 5.0, 'delay': 0.0, 'condition': 'none'},
-    'd': {'key': 'd', 'start': 20.0, 'end': 3.0, 'delay': 0.0, 'condition': 'none'},
-    # 加血类 设置为残血才放
-    'space': {'key': 'space', 'start': 150.0, 'end': 60.0, 'delay': 480.0, 'condition': 'low_health'},
-    'e': {'key': 'e', 'start': 200.0, 'end': 60.0, 'delay': 180.0, 'condition': 'low_health'},
-
-    'right_click': {'key': 'right_click', 'start': 9.0, 'end': 9.0, 'delay': 0.0, 'condition': 'none'},
-    'f': {'key': 'f', 'start': 50.0, 'end': 30.0, 'delay': 300.0, 'condition': 'none'},
-    '4': {'key': '4', 'start': 100.0, 'end': 50.0, 'delay': 120.0, 'condition': 'none'},
-    'q': {'key': 'q', 'start': 160.0, 'end': 60.0, 'delay': 180.0, 'condition': 'none'},
-}
-
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
@@ -98,6 +114,7 @@ class POINT(ctypes.Structure):
 
 def get_mouse_pos():
     pt = POINT()
+    # noinspection PyUnresolvedReferences
     ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
     return pt.x, pt.y
 
@@ -115,6 +132,7 @@ def is_game_running(process_name):
 def move_window_to_top_right():
     hwnd = win32gui.FindWindow(None, WINDOW_NAME)
     if hwnd:
+        # noinspection PyUnresolvedReferences
         screen_w = ctypes.windll.user32.GetSystemMetrics(0)
         rect = win32gui.GetWindowRect(hwnd)
         win_w = rect[2] - rect[0]
@@ -139,12 +157,13 @@ def move_window_to_top_right():
 def level_up_skill(target_level):
     if target_level > len(SKILL_UPGRADE_ORDER):
         return
-    skill_to_upgrade = SKILL_UPGRADE_ORDER[target_level - 1]
-    display_name = DISPLAY_NAMES.get(skill_to_upgrade, skill_to_upgrade.upper())
+    logical_action = SKILL_UPGRADE_ORDER[target_level - 1]
+    physical_key = KEY_BINDINGS.get(logical_action, logical_action)  # 查字典获取真实按键
+    display_name = DISPLAY_NAMES.get(logical_action, logical_action)
 
     pydirectinput.keyDown('ctrl')
     time.sleep(0.05)
-    pydirectinput.press(skill_to_upgrade)
+    pydirectinput.press(physical_key)
     time.sleep(0.05)
     pydirectinput.keyUp('ctrl')
     print(f"🔼 升级啦！当前等级 {target_level}，自动加点: {display_name}")
@@ -171,7 +190,7 @@ def visual_monitor_thread():
 
                 client_point = win32gui.ClientToScreen(hwnd, (0, 0))
 
-                # ================= 1. 区域坐标计算 =================
+                # ================= 区域坐标计算 =================
                 abs_x_lvl = client_point[0] + 310
                 abs_y_lvl = client_point[1] + 744
                 level_region = {'top': abs_y_lvl, 'left': abs_x_lvl, 'width': 13, 'height': 13}
@@ -197,14 +216,13 @@ def visual_monitor_thread():
                     # 圆环掩码：创建一个纯黑背景，中间画一个白圆，只保留圆形区域内的图像，抹除四个角的边框残影
                     mask = np.zeros(enlarged_lvl.shape, dtype=np.uint8)
                     center_x, center_y = enlarged_lvl.shape[1] // 2, enlarged_lvl.shape[0] // 2
-                    # 半径设为 28 (原图13*5=65，中心点32，半径28刚好能切掉四个角的边框)
+                    # 半径，原图13*5=65，中心点32
                     cv2.circle(mask, (center_x, center_y), 35, 255, -1)
                     enlarged_lvl = cv2.bitwise_and(enlarged_lvl, enlarged_lvl, mask=mask)
 
                     # y在二值化前加入 3x3 的高斯模糊，彻底消除放大带来的锯齿，让数字边缘如德芙般顺滑
                     enlarged_lvl = cv2.GaussianBlur(enlarged_lvl, (3, 3), 0)
 
-                    # 【优化】移除粗暴的 dilate 操作，将阈值从 150 提升到 165。
                     # 阈值越高，画面中被判定为黑字的像素就越少，数字自然就变细了，完美保留字体圆弧形状且剥离粘连！
                     _, thresh_lvl = cv2.threshold(enlarged_lvl, 165, 255, cv2.THRESH_BINARY_INV)
 
@@ -212,7 +230,7 @@ def visual_monitor_thread():
                     thresh_lvl = cv2.copyMakeBorder(thresh_lvl, 10, 10, 10, 10, cv2.BORDER_CONSTANT,
                                                     value=[255, 255, 255])
                     # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
-                    cv2.imwrite('debug_ocr_level.png', thresh_lvl)
+                    cv2.imwrite(os.path.join('debug', 'ocr_level.png'), thresh_lvl)
 
                     # 如果等级框全白（二值化反转后全白，说明原图UI消失了），说明游戏退出了结算
                     if game_state['current_level'] > 0 and np.mean(thresh_lvl) >= 250.0:
@@ -221,11 +239,11 @@ def visual_monitor_thread():
                         time.sleep(0.1)
                         pydirectinput.click()
                         time.sleep(1.5)  # 休眠一会，避免疯狂连点
-                        game_state['current_level'] = 0  # 🐛修复：归零等级，切断当前及后续所有附身/商城的视觉计算
-                        game_state['is_paused'] = True  # 🐛修复：全局挂起，彻底冻结所有 action_worker 动作线程
-                        continue # 退出视觉循环
+                        game_state['current_level'] = 0
+                        game_state['is_paused'] = True
+                        continue
 
-                    custom_config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789'
+                    custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789'
                     level_text = pytesseract.image_to_string(thresh_lvl, config=custom_config).strip()
 
                     if level_text.isdigit():
@@ -233,7 +251,11 @@ def visual_monitor_thread():
                         if 0 < read_level <= 18:
                             if game_state['current_level'] == 0:
                                 print(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
-                                time.sleep(10.0)
+                                # 开局直接标记为已购买
+                                game_state['has_shopped_this_visit'] = True
+                                game_state['last_shop_time'] = time.time()
+
+                                time.sleep(8.0)
                                 # ================= 动态亮度校准 =================
                                 w_img_calib = np.array(sct.grab(w_region))
                                 w_base_now = np.mean(cv2.cvtColor(w_img_calib, cv2.COLOR_BGRA2GRAY))
@@ -291,7 +313,7 @@ def visual_monitor_thread():
                         # ================= 商城回城状态处理 =================
                         shop_img = np.array(sct.grab(shop_region))
                         shop_gray = cv2.cvtColor(shop_img, cv2.COLOR_BGRA2GRAY)
-                        cv2.imwrite('debug_ocr_shop.png', shop_gray)
+                        cv2.imwrite(os.path.join('debug', 'ocr_shop.png'), shop_gray)
                         shop_mean = np.mean(shop_gray)
 
                         is_in_base = shop_mean > (base_shop_bright * game_state['brightness_ratio'])
@@ -333,8 +355,7 @@ def visual_monitor_thread():
 
                         # 原始X中心加上偏移量，提前探测掉血
                         hp_center_x = client_point[0] + teammate_x_list[current_teammate_idx] + shift_x
-                        # Y 轴取528中心，高度6
-                        # X 轴取中心点左右各 5 像素 (width=10)，组成一个探测框
+                        # Y 轴取528，高度6；X 轴取中心点左右各 5 像素 (width=10)，组成一个探测框
                         health_region = {
                             'top': client_point[1] + 525,
                             'left': hp_center_x - 5,
@@ -344,69 +365,76 @@ def visual_monitor_thread():
 
                         hp_img = np.array(sct.grab(health_region))
                         hp_gray = cv2.cvtColor(hp_img, cv2.COLOR_BGRA2GRAY)
-                        cv2.imwrite('debug_ocr_hp.png', hp_gray)
+                        cv2.imwrite(os.path.join('debug', 'ocr_hp.png'), hp_gray)
                         hp_mean = np.mean(hp_gray)
 
                         # 只有当这个区域变成暗黑，才判定为残血（掉血超过一半经过了中心点）
                         game_state['teammate_low_health'] = hp_mean < (
                                     base_health_black * game_state['brightness_ratio'])
 
-                        # ================= 紧急技能释放 (E & Space) =================
+                        # ================= 紧急技能释放 =================
                         # 如果没有被暂停，且队友残血，立即进行CD判定并释放
                         if game_state['teammate_low_health'] and not game_state['is_paused']:
                             current_time = time.time()
                             elapsed = current_time - game_state['start_time']
 
-                            # E 技能动态冷却 (200秒 -> 60秒)
-                            e_cd = max(60.0, 200.0 - ((200.0 - 60.0) / TRANSITION_TIME) * elapsed)
-                            if current_time - game_state['last_cast']['e'] >= e_cd:
-                                pydirectinput.press('e')
-                                print(f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 治疗(E)！(冷却: {e_cd:.1f}s)")
-                                game_state['last_cast']['e'] = current_time
-                                time.sleep(0.1)
+                            # 遍历所有被定性为“紧急救援”的逻辑动作
+                            for action_name in ['SUMMONER_HEAL', 'R']:
+                                config = ACTION_CONFIG[action_name]
+                                start_cd = config['start']
+                                end_cd = config['end']
 
-                            # Space 技能动态冷却 (150秒 -> 60秒)
-                            space_cd = max(100.0, 150.0 - ((150.0 - 60.0) / TRANSITION_TIME) * elapsed)
-                            if current_time - game_state['last_cast']['space'] >= space_cd:
-                                pydirectinput.press('space')
-                                print(
-                                    f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 大招(Space)！(冷却: {space_cd:.1f}s)")
-                                game_state['last_cast']['space'] = current_time
-                                time.sleep(0.1)
+                                # 动态冷却计算 (根据全局配置的起止时间计算)
+                                current_cd = max(end_cd, start_cd - ((start_cd - end_cd) / TRANSITION_TIME) * elapsed)
+
+                                if current_time - game_state['last_cast'][action_name] >= current_cd:
+                                    physical_key = KEY_BINDINGS[action_name]
+                                    display_name = DISPLAY_NAMES.get(action_name, action_name)
+
+                                    pydirectinput.press(physical_key)
+                                    print(
+                                        f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(冷却: {current_cd:.1f}s)")
+
+                                    game_state['last_cast'][action_name] = current_time
+                                    time.sleep(0.1)
                         # ---- W 技能图标状态处理 ----
                         w_img = np.array(sct.grab(w_region))
                         w_gray = cv2.cvtColor(w_img, cv2.COLOR_BGRA2GRAY)
-                        cv2.imwrite('debug_ocr_w.png', w_gray)
+                        cv2.imwrite(os.path.join('debug', 'ocr_w.png'), w_gray)
                         w_mean_brightness = np.mean(w_gray)
 
                         current_time = time.time()
                         is_attached = w_mean_brightness > (base_w_attach * game_state['brightness_ratio'])
 
                         if current_time - last_print_time > 5.0:
-                            state_str = "附身中" if is_attached else "未附身"
-                            hp_str = "⚠️残血!" if game_state['teammate_low_health'] else "健康"
-                            # 调试开关：你可以在这取消注释来看看血条的判定数值准不准
-                            # print(f"[Debug] W亮度:{w_mean_brightness:.1f}({state_str}) | 队友{current_teammate_idx+1} 血条亮度:{hp_mean:.1f}({hp_str})")
                             last_print_time = current_time
 
                         if not is_attached:
                             if not game_state['is_paused']:
-                                print(f"[{time.strftime('%H:%M:%S')}] 📉 未附身/回城/死亡，暂停其余动作循环！")
+                                print(f"[{time.strftime('%H:%M:%S')}] 📉 未附身/死亡，暂停其余动作循环！")
                                 game_state['is_paused'] = True
 
+                                # 紧急判断：如果不在泉水，且距离上次手动按A超过3秒（排除玩家正常换人），说明是队友阵亡
+                                if not is_in_base and (current_time - game_state.get('last_manual_attach_time', 0.0) > 3.0):
+                                    print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到野外意外脱落，按下B键紧急回城！")
+                                    pydirectinput.press('b')
+                                    game_state['last_recall_time'] = current_time
+
                             if game_state['attach_x'] and game_state['attach_y']:
-                                if current_time - game_state['last_auto_attach_time'] > 5.0:
-                                    print(
-                                        f"[{time.strftime('%H:%M:%S')}] 🔗 尝试自动附身到队友 {game_state['attached_teammate_index'] + 1}...")
-                                    pydirectinput.moveTo(game_state['attach_x'], game_state['attach_y'])
-                                    time.sleep(0.1)
+                                # 如果刚刚按了回城，必须等 9 秒读条结束，期间不准执行任何附身动作
+                                if current_time - game_state.get('last_recall_time', 0.0) > 9.0:
+                                    if current_time - game_state['last_auto_attach_time'] > 5.0:
+                                        print(
+                                            f"[{time.strftime('%H:%M:%S')}] 🔗 尝试自动附身到队友 {game_state['attached_teammate_index'] + 1}...")
+                                        pydirectinput.moveTo(game_state['attach_x'], game_state['attach_y'])
+                                        time.sleep(0.1)
 
-                                    game_state['is_simulating_a'] = True
-                                    pydirectinput.press('a')
-                                    time.sleep(0.1)
-                                    game_state['is_simulating_a'] = False
+                                        game_state['is_simulating_attach'] = True
+                                        pydirectinput.press(KEY_BINDINGS['W'])
+                                        time.sleep(0.1)
+                                        game_state['is_simulating_attach'] = False
 
-                                    game_state['last_auto_attach_time'] = current_time
+                                        game_state['last_auto_attach_time'] = current_time
                         else:
                             if game_state['is_paused'] and not is_in_base: # 确保在泉水买东西时不要马上重置暂停状态
                                 print(f"[{time.strftime('%H:%M:%S')}] 📈 判定已成功附身，恢复动作循环！")
@@ -424,15 +452,14 @@ def action_worker(action_name, config, start_offset):
     active_start_time = 0.0
     next_interval = config['start']
     was_paused = False
-
-    physical_key = config['key']
+    physical_key = KEY_BINDINGS.get(action_name, action_name)
     condition = config.get('condition', 'none')
-    display_name = f"[{action_name}] {DISPLAY_NAMES.get(physical_key, physical_key.upper())}"
+    display_name = f"[{DISPLAY_NAMES.get(action_name, action_name)}] ({str(physical_key).upper()})"
 
     while True:
         is_paused_now = game_state['is_paused']
 
-        # 冻结时间逻辑：刚刚从暂停恢复时，重置上一次释放时间，防止上车瞬间技能狂泻
+        # 冻结时间逻辑：刚刚从暂停恢复时，重置上一次释放时间，防止技能狂泻
         if not is_paused_now and was_paused:
             last_time = time.time()
 
@@ -463,9 +490,13 @@ def action_worker(action_name, config, start_offset):
                     time.sleep(0.5)
                     continue
 
-                # 释放前先将鼠标移动到屏幕中心附近的随机位置
-                rx = game_state['center_x'] + random.randint(-80, 80)
-                ry = game_state['center_y'] + random.randint(-80, 80)
+                # 获取该技能配置的施法距离范围，使用极坐标算法随机计算坐标
+                radius_range = config.get('radius', [0, 80])
+                r = random.uniform(radius_range[0], radius_range[1])
+                theta = random.uniform(0, 2 * math.pi)
+
+                rx = int(game_state['center_x'] + r * math.cos(theta))
+                ry = int(game_state['center_y'] + r * math.sin(theta))
                 pydirectinput.moveTo(rx, ry)
                 time.sleep(0.05)
 
@@ -495,12 +526,10 @@ def action_worker(action_name, config, start_offset):
         time.sleep(0.05)
 
 
-# ==========================================
 # 键盘监听钩子 - 模糊吸附
-# ==========================================
-def on_press_a(event):
-    # 屏蔽脚本模拟的 A，屏蔽升级技能用的 Ctrl+A
-    if not game_state['is_running'] or game_state['is_simulating_a'] or keyboard.is_pressed('ctrl'):
+def on_manual_attach(event):
+    # 屏蔽脚本模拟的按键，屏蔽升级技能用的 Ctrl+按键
+    if not game_state['is_running'] or game_state['is_simulating_attach'] or keyboard.is_pressed('ctrl'):
         return
 
     x, y = get_mouse_pos()
@@ -511,7 +540,7 @@ def on_press_a(event):
     base_x, base_y = client_point
 
     # 填入你校准的4个队友头像相对中心点坐标
-    TEAMMATE_REL_POSITIONS = [
+    teammate_rel_positions = [
         (840, 505),  # 队友 1
         (894, 505),  # 队友 2
         (945, 505),  # 队友 3
@@ -523,7 +552,7 @@ def on_press_a(event):
     closest_index = 0
     min_dist = float('inf')
 
-    for i, (rel_x, rel_y) in enumerate(TEAMMATE_REL_POSITIONS):
+    for i, (rel_x, rel_y) in enumerate(teammate_rel_positions):
         abs_px = base_x + rel_x
         abs_py = base_y + rel_y
         dist = math.hypot(x - abs_px, y - abs_py)
@@ -538,14 +567,16 @@ def on_press_a(event):
         # 记录当前吸附的是几号队友，供视觉线程读血条使用
         game_state['attached_teammate_index'] = closest_index
         game_state['last_auto_attach_time'] = time.time()
-        print(f"\n[按键捕捉] 手动按下A键！已吸附队友 {closest_index + 1} 坐标: {closest_pos}\n")
+        game_state['last_manual_attach_time'] = time.time()
+        print(f"\n[按键捕捉] 手动按下 {str(event.name).upper()} 键！已吸附队友 {closest_index + 1} 坐标: {closest_pos}\n")
 
 
 def main_controller():
     print("🤖 悠米专属高级自动化脚本已启动...")
     print("提示：按 [Ctrl + C] 终止。\n")
 
-    keyboard.on_press_key('a', on_press_a)
+    attach_key = KEY_BINDINGS.get('W', 'w')
+    keyboard.on_press_key(attach_key, on_manual_attach)
 
     cv_thread = threading.Thread(target=visual_monitor_thread, daemon=True)
     cv_thread.start()
@@ -585,6 +616,7 @@ def main_controller():
                 time.sleep(3.0)  # 给大厅一点弹出的缓冲时间
                 lobby_hwnd = win32gui.FindWindow(None, "League of Legends")
                 if lobby_hwnd:
+                    # noinspection PyUnresolvedReferences
                     screen_w = ctypes.windll.user32.GetSystemMetrics(0)
                     rect = win32gui.GetWindowRect(lobby_hwnd)
                     win_w = rect[2] - rect[0]
@@ -597,12 +629,19 @@ def main_controller():
                                           win32con.SWP_SHOWWINDOW)
 
                     print(f"🪟 已将游戏大厅移动至右上角: ({new_x}, {new_y})")
-                    # 2. 移动鼠标到大厅底部正中间并双击，触发 LeagueAkari 所需的重新匹配
-                    time.sleep(35.0)
-                    # Y轴偏移减去 40 像素，确保点在“再来一局”等底部按钮区域上
+                    # 2. 点击底部三角标跳过结算等待动画
+                    time.sleep(2.0)
+                    skip_x = new_x + win_w // 2
+                    skip_y = win_h - 55
+                    pydirectinput.moveTo(skip_x, skip_y)
+                    time.sleep(0.5)
+                    pydirectinput.click()
+                    print("⏭️ 已点击跳过结算动画")
+
+                    # 3. 移动鼠标到大厅底部左侧位置并连续点击，触发 LeagueAkari 所需的重新匹配
+                    time.sleep(3.0)
                     target_x = new_x + win_w // 2 - 100
                     target_y = win_h - 40
-                    time.sleep(1.0)  # 窗口移动后稍微等一下
                     pydirectinput.moveTo(target_x, target_y)
                     for i in range(5):
                         time.sleep(2.5)
