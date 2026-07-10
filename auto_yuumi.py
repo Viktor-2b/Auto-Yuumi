@@ -70,6 +70,7 @@ game_state = {
     'attached_teammate_index': 0,
     # 记录商店购买状态，防止在泉水里无限买东西
     'has_shopped_this_visit': False,
+'last_shop_time': 0.0,  # 记录上一次成功购买的时间戳
     # 记录紧急救援技能的上一次释放时间
     'last_cast': {'e': 0.0, 'space': 0.0},
     # 记录屏幕亮度动态缩放比例
@@ -296,7 +297,7 @@ def visual_monitor_thread():
                         is_in_base = shop_mean > (base_shop_bright * game_state['brightness_ratio'])
 
                         if is_in_base:
-                            if not game_state['has_shopped_this_visit']:
+                            if not game_state['has_shopped_this_visit']and (time.time() - game_state.get('last_shop_time', 0.0) > 30.0):
                                 print(f"\n[{time.strftime('%H:%M:%S')}] 🏠 检测到商城点亮(在泉水中)，执行自动购买！")
                                 game_state['is_paused'] = True
 
@@ -317,8 +318,10 @@ def visual_monitor_thread():
                                 time.sleep(0.5)
 
                                 game_state['has_shopped_this_visit'] = True
+                                game_state['last_shop_time'] = time.time()
                         else:
-                            game_state['has_shopped_this_visit'] = False
+                            if time.time() - game_state.get('last_shop_time', 0.0) > 30.0:
+                                game_state['has_shopped_this_visit'] = False
 
                         # ---- 血条状态处理 (动态追踪) ----
                         # 读取当前记录的队友索引，计算他专属的血条坐标
