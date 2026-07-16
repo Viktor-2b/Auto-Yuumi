@@ -212,20 +212,23 @@ def visual_monitor_thread():
                     level_img = np.array(sct.grab(level_region))
                     cv2.imwrite(os.path.join('debug', 'raw_level.png'), level_img)
                     gray_lvl = cv2.cvtColor(level_img, cv2.COLOR_BGRA2GRAY)
+                    # 放大5倍
                     enlarged_lvl = cv2.resize(gray_lvl, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
-                    _, thresh = cv2.threshold(enlarged_lvl, 140, 255, cv2.THRESH_BINARY_INV)
-                    # 圆环掩码：创建一个纯黑背景，中间画一个白圆，只保留圆形区域内的图像，抹除四个角的边框残影
-                    mask = np.zeros(thresh.shape, dtype=np.uint8)
-                    center_x, center_y = thresh.shape[1] // 2, thresh.shape[0] // 2
-                    # 半径，原图13*5=65，中心点32
+                    # 超高阈值剥离
+                    _, thresh_lvl = cv2.threshold(enlarged_lvl, 220, 255, cv2.THRESH_BINARY_INV)
+                    # 圆环掩码
+                    mask = np.zeros(thresh_lvl.shape, dtype=np.uint8)
+                    center_x, center_y = thresh_lvl.shape[1] // 2, thresh_lvl.shape[0] // 2
                     cv2.circle(mask, (center_x, center_y), 35, 255, -1)
-                    final_lvl = np.where(mask == 255, thresh, 255)
-
-                    # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
+                    # 圈外全白并加宽白边
+                    final_lvl = np.where(mask == 255, thresh_lvl, 255)
+                    final_lvl = cv2.copyMakeBorder(final_lvl, 20, 20, 20, 20, cv2.BORDER_CONSTANT,
+                                                   value=[255, 255, 255])
+                    # 保存最终处理结果
                     cv2.imwrite(os.path.join('debug', 'ocr_level.png'), final_lvl)
 
                     # 如果等级框全白（二值化反转后全白，说明原图UI消失了），说明游戏退出了结算
-                    if game_state['current_level'] > 0 and np.mean(final_lvl) >= 250.0:
+                    if game_state['current_level'] > 0 and np.mean(final_lvl) >= 252.0:
                         print(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到等级框全白，游戏结束，点击屏幕中心退出！")
                         pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
                         time.sleep(0.1)
