@@ -210,17 +210,17 @@ def visual_monitor_thread():
                 with mss.MSS() as sct:
                     # ---- 等级处理 ----
                     level_img = np.array(sct.grab(level_region))
+                    cv2.imwrite(os.path.join('debug', 'raw_level.png'), level_img)
                     gray_lvl = cv2.cvtColor(level_img, cv2.COLOR_BGRA2GRAY)
                     enlarged_lvl = cv2.resize(gray_lvl, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
-
+                    _, thresh = cv2.threshold(enlarged_lvl, 140, 255, cv2.THRESH_BINARY_INV)
                     # 圆环掩码：创建一个纯黑背景，中间画一个白圆，只保留圆形区域内的图像，抹除四个角的边框残影
-                    mask = np.zeros(enlarged_lvl.shape, dtype=np.uint8)
-                    center_x, center_y = enlarged_lvl.shape[1] // 2, enlarged_lvl.shape[0] // 2
+                    mask = np.zeros(thresh.shape, dtype=np.uint8)
+                    center_x, center_y = thresh.shape[1] // 2, thresh.shape[0] // 2
                     # 半径，原图13*5=65，中心点32
                     cv2.circle(mask, (center_x, center_y), 35, 255, -1)
-                    masked_lvl = cv2.bitwise_and(enlarged_lvl, enlarged_lvl, mask=mask)
+                    final_lvl = np.where(mask == 255, thresh, 255)
 
-                    final_lvl = cv2.bitwise_not(masked_lvl)
                     # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
                     cv2.imwrite(os.path.join('debug', 'ocr_level.png'), final_lvl)
 
