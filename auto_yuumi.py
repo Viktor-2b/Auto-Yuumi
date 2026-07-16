@@ -218,22 +218,14 @@ def visual_monitor_thread():
                     center_x, center_y = enlarged_lvl.shape[1] // 2, enlarged_lvl.shape[0] // 2
                     # 半径，原图13*5=65，中心点32
                     cv2.circle(mask, (center_x, center_y), 35, 255, -1)
-                    enlarged_lvl = cv2.bitwise_and(enlarged_lvl, enlarged_lvl, mask=mask)
+                    masked_lvl = cv2.bitwise_and(enlarged_lvl, enlarged_lvl, mask=mask)
 
-                    # y在二值化前加入 3x3 的高斯模糊，彻底消除放大带来的锯齿，让数字边缘如德芙般顺滑
-                    enlarged_lvl = cv2.GaussianBlur(enlarged_lvl, (3, 3), 0)
-
-                    # 阈值越高，画面中被判定为黑字的像素就越少，数字自然就变细了，完美保留字体圆弧形状且剥离粘连！
-                    _, thresh_lvl = cv2.threshold(enlarged_lvl, 165, 255, cv2.THRESH_BINARY_INV)
-
-                    # 继续添加白色边框 Padding。这正是解决 11 级贴边被当成噪点过滤的核心办法
-                    thresh_lvl = cv2.copyMakeBorder(thresh_lvl, 10, 10, 10, 10, cv2.BORDER_CONSTANT,
-                                                    value=[255, 255, 255])
+                    final_lvl = cv2.bitwise_not(masked_lvl)
                     # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
-                    cv2.imwrite(os.path.join('debug', 'ocr_level.png'), thresh_lvl)
+                    cv2.imwrite(os.path.join('debug', 'ocr_level.png'), final_lvl)
 
                     # 如果等级框全白（二值化反转后全白，说明原图UI消失了），说明游戏退出了结算
-                    if game_state['current_level'] > 0 and np.mean(thresh_lvl) >= 250.0:
+                    if game_state['current_level'] > 0 and np.mean(final_lvl) >= 250.0:
                         print(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到等级框全白，游戏结束，点击屏幕中心退出！")
                         pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
                         time.sleep(0.1)
@@ -244,7 +236,7 @@ def visual_monitor_thread():
                         continue
 
                     custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789'
-                    level_text = pytesseract.image_to_string(thresh_lvl, config=custom_config).strip()
+                    level_text = pytesseract.image_to_string(final_lvl, config=custom_config).strip()
 
                     if level_text.isdigit():
                         read_level = int(level_text)
