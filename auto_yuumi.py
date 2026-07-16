@@ -169,6 +169,10 @@ def level_up_skill(target_level):
     physical_key = KEY_BINDINGS.get(logical_action, logical_action)  # 查字典获取真实按键
     display_name = DISPLAY_NAMES.get(logical_action, logical_action)
 
+    # 上锁，防止被其他技能消耗
+    game_state['exclusive_mouse_until'] = time.time() + 1.0
+    time.sleep(0.2)
+
     pydirectinput.keyDown('ctrl')
     time.sleep(0.05)
     pydirectinput.press(physical_key)
@@ -225,7 +229,7 @@ def visual_monitor_thread():
                     mask = np.zeros(enlarged_lvl.shape, dtype=np.uint8)
                     center_x, center_y = enlarged_lvl.shape[1] // 2, enlarged_lvl.shape[0] // 2
                     # 半径，原图13*5=65，中心点32
-                    cv2.circle(mask, (center_x, center_y), 35, 255, -1)
+                    cv2.circle(mask, (center_x, center_y), 33, 255, -1)
                     masked_lvl = cv2.bitwise_and(enlarged_lvl, enlarged_lvl, mask=mask)
 
                     final_lvl = cv2.bitwise_not(masked_lvl)
@@ -258,7 +262,7 @@ def visual_monitor_thread():
                                 game_state['has_shopped_this_visit'] = True
                                 game_state['last_shop_time'] = time.time()
 
-                                time.sleep(8.0)
+                                time.sleep(5.0)
                                 # ================= 动态亮度校准 =================
                                 w_img_calib = np.array(sct.grab(w_region))
                                 w_base_now = np.mean(cv2.cvtColor(w_img_calib, cv2.COLOR_BGRA2GRAY))
@@ -272,6 +276,32 @@ def visual_monitor_thread():
                                 if w_base_now > 180.0:
                                     print(
                                         "⚠️ [警告] 初始亮度偏高，若您是在附身状态下启动的脚本，校准可能会产生偏差！建议下车后重启脚本。")
+
+                                # 1. 中心点聚焦点击 (拆分按下与松开)
+                                pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
+                                time.sleep(0.1)
+                                pydirectinput.mouseDown()
+                                time.sleep(0.05)
+                                pydirectinput.mouseUp()
+                                print("🖱️ 已点击屏幕中心聚焦游戏窗口")
+                                time.sleep(0.5)
+
+                                pydirectinput.press('y')
+                                print("👁️ 已自动按下 Y 键锁定视角")
+                                time.sleep(0.5)
+
+                                # 2. 分路选择点击 (拆分按下与松开)
+                                role_x = client_point[0] + 675
+                                role_y = client_point[1] + 650
+                                pydirectinput.moveTo(role_x, role_y)
+                                time.sleep(0.1)
+                                pydirectinput.mouseDown()
+                                time.sleep(0.05)
+                                pydirectinput.mouseUp()
+                                print("🎯 已自动点击分路任务 (辅助位置)")
+
+                                game_state['current_level'] = read_level
+                                level_up_skill(read_level)
                                 # 在真正进入游戏地图时，将时间锚点重置。
                                 game_state['start_time'] = time.time()
                                 try:
@@ -298,41 +328,32 @@ def visual_monitor_thread():
                                             side_cn = "蓝色方(基地在左下)" if game_state[
                                                                                   'team_side'] == 'ORDER' else "红色方(基地在右上)"
                                             print(f"🚩 局内 API 连通！识别到玩家 [{active_name}]，当前阵营: {side_cn}")
+                                            # 取出所有队友（排除自己）
+                                            allies = [p for p in all_players if
+                                                      p.get('team') == game_state['team_side'] and (
+                                                                  p.get('riotIdGameName') or p.get(
+                                                              'summonerName')) != active_name]
+
+                                            # 默认跟随 UI 上的第 4 个队友 (索引3)，如果有人的位置是 BOTTOM，则自动纠正
+                                            adc_idx = 3
+                                            for i, ally in enumerate(allies):
+                                                if ally.get('position') == 'BOTTOM':
+                                                    adc_idx = i
+                                                    adc_name = ally.get('riotIdGameName') or ally.get('summonerName')
+                                                    print(
+                                                        f"🎯 API 分析完毕：下路射手是 [{adc_name}]，位于 UI 列表第 {adc_idx + 1} 位")
+                                                    break
+
+                                            game_state['attached_teammate_index'] = adc_idx
+                                            game_state['attach_x'] = client_point[0] + teammate_x_list[adc_idx]
+                                            game_state['attach_y'] = client_point[1] + 505
+                                            print(f"🎯 已根据官方 API 设定默认跟随目标！")
+
                                         else:
                                             print(f"⚠️ API 通信正常，但在名单中未找到匹配的阵营信息！")
                                 except Exception as e:
                                     print(f"⚠️ 无法获取阵营信息，Q技能将使用全向随机盲打。错误: {e}")
-                                # 1. 中心点聚焦点击 (拆分按下与松开)
-                                pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
-                                time.sleep(0.1)
-                                pydirectinput.mouseDown()
-                                time.sleep(0.05)
-                                pydirectinput.mouseUp()
-                                print("🖱️ 已点击屏幕中心聚焦游戏窗口")
-                                time.sleep(0.5)
 
-                                pydirectinput.press('y')
-                                print("👁️ 已自动按下 Y 键锁定视角")
-                                time.sleep(0.5)
-
-                                # 2. 分路选择点击 (拆分按下与松开)
-                                role_x = client_point[0] + 675
-                                role_y = client_point[1] + 650
-                                pydirectinput.moveTo(role_x, role_y)
-                                time.sleep(0.1)
-                                pydirectinput.mouseDown()
-                                time.sleep(0.05)
-                                pydirectinput.mouseUp()
-                                print("🎯 已自动点击分路任务 (辅助位置)")
-
-                                # 默认跟随右边第一个队友
-                                game_state['attached_teammate_index'] = 0
-                                game_state['attach_x'] = client_point[0] + 840
-                                game_state['attach_y'] = client_point[1] + 505
-                                print("🎯 已设置默认跟随：右边第一个队友 (脚本将自动触发附身)")
-
-                                game_state['current_level'] = read_level
-                                level_up_skill(read_level)
 
                             elif read_level > game_state['current_level']:
                                 game_state['current_level'] = read_level
@@ -581,6 +602,8 @@ def action_worker(action_name, config, start_offset):
                 if physical_key == 'right_click':
                     # 模拟真人狂点右键的习惯：随机点 2 到 5 下
                     click_times = random.randint(2, 5)
+                    lock_duration = click_times * 0.25
+                    game_state['exclusive_mouse_until'] = time.time() + lock_duration
                     for _ in range(click_times):
                         # 在原始落点附近，加上 -20 到 20 像素的微小抖动偏移
                         offset_x = rx + random.randint(-20, 20)
