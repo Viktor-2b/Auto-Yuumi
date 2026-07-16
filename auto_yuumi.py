@@ -14,6 +14,9 @@ import cv2
 import numpy as np
 import mss
 import pytesseract
+import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) # 忽略局域网证书警告
 
 # ==========================================
 # 强制开启 Windows DPI 感知
@@ -71,7 +74,7 @@ ACTION_CONFIG: dict = {
     'R': {'start': 150.0, 'end': 60.0, 'delay': 480.0, 'condition': 'low_health', 'radius': [50, 150]},
     'SUMMONER_HEAL': {'start': 200.0, 'end': 60.0, 'delay': 180.0, 'condition': 'low_health', 'radius': [0, 10]},
     'SUMMONER_EXHAUST': {'start': 20.0, 'end': 5.0, 'delay': 0.0, 'condition': 'none', 'radius': [50, 150]},
-    'MOVE': {'start': 9.0, 'end': 9.0, 'delay': 0.0, 'condition': 'none', 'radius': [50, 100]},
+    'MOVE': {'start': 4.0, 'end': 4.0, 'delay': 0.0, 'condition': 'none', 'radius': [50, 100]},
     'WARD_AUX_EQUIP': {'start': 50.0, 'end': 30.0, 'delay': 300.0, 'condition': 'none', 'radius': [60, 120]},
     'WARD_ACCESSORY': {'start': 100.0, 'end': 50.0, 'delay': 120.0, 'condition': 'none', 'radius': [60, 120]},
 }
@@ -105,7 +108,12 @@ game_state: dict = {
     # 记录野外意外脱落后，按下B键回城的时间
     'last_recall_time': 0.0,
     # 记录玩家真实按下A键的时间，防止手动换乘时被误判为掉落
-    'last_manual_attach_time': 0.0
+    'last_manual_attach_time': 0.0,
+
+    # 记录 Q 技能霸占鼠标的结束时间
+    'exclusive_mouse_until': 0.0,
+    # 记录当前处于哪一方：'ORDER' (蓝方/左下) 或 'CHAOS' (红方/右上)
+    'team_side': None
 }
 
 class POINT(ctypes.Structure):
@@ -210,25 +218,25 @@ def visual_monitor_thread():
                 with mss.MSS() as sct:
                     # ---- 等级处理 ----
                     level_img = np.array(sct.grab(level_region))
-                    cv2.imwrite(os.path.join('debug', 'raw_level.png'), level_img)
                     gray_lvl = cv2.cvtColor(level_img, cv2.COLOR_BGRA2GRAY)
-                    # 放大5倍
                     enlarged_lvl = cv2.resize(gray_lvl, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
-                    # 超高阈值剥离
-                    _, thresh_lvl = cv2.threshold(enlarged_lvl, 220, 255, cv2.THRESH_BINARY_INV)
-                    # 圆环掩码
-                    mask = np.zeros(thresh_lvl.shape, dtype=np.uint8)
-                    center_x, center_y = thresh_lvl.shape[1] // 2, thresh_lvl.shape[0] // 2
+
+                    # 圆环掩码：创a建一个纯黑背景，中间画一个白圆，只保留圆形区域内的图像，抹除四个角的边框残影
+                    mask = np.zeros(enlarged_lvl.shape, dtype=np.uint8)
+                    center_x, center_y = enlarged_lvl.shape[1] // 2, enlarged_lvl.shape[0] // 2
+                    # 半径，原图13*5=65，中心点32
                     cv2.circle(mask, (center_x, center_y), 35, 255, -1)
-                    # 圈外全白并加宽白边
-                    final_lvl = np.where(mask == 255, thresh_lvl, 255)
-                    final_lvl = cv2.copyMakeBorder(final_lvl, 20, 20, 20, 20, cv2.BORDER_CONSTANT,
-                                                   value=[255, 255, 255])
-                    # 保存最终处理结果
-                    cv2.imwrite(os.path.join('debug', 'ocr_level.png'), final_lvl)
+                    masked_lvl = cv2.bitwise_and(enlarged_lvl, enlarged_lvl, mask=mask)
+
+                    final_lvl = cv2.bitwise_not(masked_lvl)
+
+                    _, binary_lvl = cv2.threshold(final_lvl, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+                    # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
+                    cv2.imwrite(os.path.join('debug', 'ocr_level.png'), binary_lvl)
 
                     # 如果等级框全白（二值化反转后全白，说明原图UI消失了），说明游戏退出了结算
-                    if game_state['current_level'] > 0 and np.mean(final_lvl) >= 252.0:
+                    if game_state['current_level'] > 0 and np.mean(final_lvl) >= 250.0:
                         print(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到等级框全白，游戏结束，点击屏幕中心退出！")
                         pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
                         time.sleep(0.1)
@@ -265,9 +273,35 @@ def visual_monitor_thread():
                                     print(
                                         "⚠️ [警告] 初始亮度偏高，若您是在附身状态下启动的脚本，校准可能会产生偏差！建议下车后重启脚本。")
                                 # 在真正进入游戏地图时，将时间锚点重置。
-                                # 否则，几分钟的加载界面时长会被提前算入全局推移时间里，导致技能CD逻辑错乱。
                                 game_state['start_time'] = time.time()
+                                try:
+                                    # 直接请求 allgamedata，一份数据包含所有所需信息
+                                    res = requests.get("https://127.0.0.1:2999/liveclientdata/allgamedata",
+                                                       verify=False, timeout=2)
+                                    if res.status_code == 200:
+                                        data = res.json()
 
+                                        # 1. 获取当前玩家名字（完美兼容 Riot ID 时代的新老键值）
+                                        active_player = data.get('activePlayer', {})
+                                        active_name = active_player.get('riotIdGameName') or active_player.get(
+                                            'summonerName')
+
+                                        # 2. 去 10 人大名单里找到自己，提取 team 字段
+                                        all_players = data.get('allPlayers', [])
+                                        for player in all_players:
+                                            p_name = player.get('riotIdGameName') or player.get('summonerName')
+                                            if p_name == active_name:
+                                                game_state['team_side'] = player.get('team')
+                                                break
+
+                                        if game_state.get('team_side'):
+                                            side_cn = "蓝色方(基地在左下)" if game_state[
+                                                                                  'team_side'] == 'ORDER' else "红色方(基地在右上)"
+                                            print(f"🚩 局内 API 连通！识别到玩家 [{active_name}]，当前阵营: {side_cn}")
+                                        else:
+                                            print(f"⚠️ API 通信正常，但在名单中未找到匹配的阵营信息！")
+                                except Exception as e:
+                                    print(f"⚠️ 无法获取阵营信息，Q技能将使用全向随机盲打。错误: {e}")
                                 # 1. 中心点聚焦点击 (拆分按下与松开)
                                 pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
                                 time.sleep(0.1)
@@ -434,6 +468,12 @@ def visual_monitor_thread():
                             if game_state['is_paused'] and not is_in_base: # 确保在泉水买东西时不要马上重置暂停状态
                                 print(f"[{time.strftime('%H:%M:%S')}] 📈 判定已成功附身，恢复动作循环！")
                                 game_state['is_paused'] = False
+                                # 成功上车后，立即将鼠标移回屏幕中间，并点一下右键
+                                pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
+                                time.sleep(0.05)
+                                pydirectinput.mouseDown(button='right')
+                                time.sleep(0.05)
+                                pydirectinput.mouseUp(button='right')
 
             except Exception as e:
                 print(f"视觉线程异常: {e}")
@@ -459,7 +499,10 @@ def action_worker(action_name, config, start_offset):
             last_time = time.time()
 
         was_paused = is_paused_now
-
+        # 检查互斥锁，如果 Q 技能正在霸占鼠标，其他线程强制睡眠等待
+        if time.time() < game_state.get('exclusive_mouse_until', 0.0):
+            time.sleep(0.1)
+            continue
         if game_state['is_running'] and game_state['start_time'] is not None and not is_paused_now and game_state[
             'current_level'] > 0:
             current_time = time.time()
@@ -488,19 +531,75 @@ def action_worker(action_name, config, start_offset):
                 # 获取该技能配置的施法距离范围，使用极坐标算法随机计算坐标
                 radius_range = config.get('radius', [0, 80])
                 r = random.uniform(radius_range[0], radius_range[1])
-                theta = random.uniform(0, 2 * math.pi)
+                # 根据阵营智能设定 Q 技能的攻击象限 (敌方所在位置)
+                if action_name == 'Q' and game_state.get('team_side'):
+                    if game_state['team_side'] == 'ORDER':
+                        # 蓝色方：向右上角打
+                        theta = random.uniform(-math.pi / 2, 0)
+                    else:
+                        # 红色方：向左下角打
+                        theta = random.uniform(math.pi / 2, math.pi)
+                else:
+                    # 其他技能或未获取到阵营：全图360度随机
+                    theta = random.uniform(0, 2 * math.pi)
 
                 rx = int(game_state['center_x'] + r * math.cos(theta))
                 ry = int(game_state['center_y'] + r * math.sin(theta))
-                pydirectinput.moveTo(rx, ry)
-                time.sleep(0.05)
+                # ========================================================
+                # 精准矩形禁区防误触 (相对坐标转绝对屏幕坐标)
+                # ========================================================
+                hwnd = win32gui.FindWindow(None, WINDOW_NAME)
+                if hwnd:
+                    client_pt = win32gui.ClientToScreen(hwnd, (0, 0))
+                    rect = win32gui.GetClientRect(hwnd)
+                    win_w, win_h = rect[2], rect[3]
+                    base_x, base_y = client_pt[0], client_pt[1]
+                else:
+                    # 备用回退机制
+                    base_x, base_y = game_state['center_x'] - 512, game_state['center_y'] - 384
+                    win_w, win_h = 1024, 768
+
+                # 禁区 1 (右侧队友血条) 转换为屏幕绝对坐标
+                r1_left, r1_top = base_x + 800, base_y + 480
+                r1_right, r1_bottom = base_x + win_w, base_y + 570
+
+                # 禁区 2 (底部 OCR 识图区) 转换为屏幕绝对坐标
+                r2_left, r2_top = base_x + 280, base_y + 660
+                r2_right, r2_bottom = base_x + 740, base_y + win_h
+
+                # 碰撞检测过滤函数：如果掉进禁区，强行把它推出来
+                def enforce_safe_zone(cx, cy):
+                    if r1_left <= cx <= r1_right and r1_top <= cy <= r1_bottom:
+                        cx = r1_left - 3  # 从左边弹出去
+                    if r2_left <= cx <= r2_right and r2_top <= cy <= r2_bottom:
+                        cy = r2_top - 3  # 从上面弹出去
+                    return cx, cy
+
+                # 主坐标先过一次安检
+                rx, ry = enforce_safe_zone(rx, ry)
 
                 if physical_key == 'right_click':
-                    pydirectinput.mouseDown(button='right')
-                    time.sleep(0.05)
-                    pydirectinput.mouseUp(button='right')
+                    # 模拟真人狂点右键的习惯：随机点 2 到 5 下
+                    click_times = random.randint(2, 5)
+                    for _ in range(click_times):
+                        # 在原始落点附近，加上 -20 到 20 像素的微小抖动偏移
+                        offset_x = rx + random.randint(-20, 20)
+                        offset_y = ry + random.randint(-20, 20)
+                        offset_x, offset_y = enforce_safe_zone(offset_x, offset_y)
+                        pydirectinput.moveTo(offset_x, offset_y)
+                        time.sleep(random.uniform(0.02, 0.05))  # 鼠标移动后的微小停顿
+                        pydirectinput.mouseDown(button='right')
+                        time.sleep(random.uniform(0.02, 0.06))  # 按下到松开的时间
+                        pydirectinput.mouseUp(button='right')
+
+                        # 两次点击之间的间隔 (极速连点)
+                        time.sleep(random.uniform(0.05, 0.15))
                 else:
+                    pydirectinput.moveTo(rx, ry)
+                    time.sleep(0.05)
                     pydirectinput.press(physical_key)
+                    if action_name == 'Q': # 如果是 Q 技能，释放后锁死所有其他鼠标线程 2 秒
+                        game_state['exclusive_mouse_until'] = time.time() + 2.0
 
                 msg = f"[{time.strftime('%H:%M:%S')}] 触发 {display_name} (距上次 {next_interval:.2f}s)"
                 if condition == 'low_health':
@@ -564,7 +663,6 @@ def on_manual_attach(event):
         game_state['last_auto_attach_time'] = time.time()
         game_state['last_manual_attach_time'] = time.time()
         print(f"\n[按键捕捉] 手动按下 {str(event.name).upper()} 键！已吸附队友 {closest_index + 1} 坐标: {closest_pos}\n")
-
 
 def main_controller():
     print("🤖 悠米专属高级自动化脚本已启动...")

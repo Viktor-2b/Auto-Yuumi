@@ -13,3 +13,7 @@ psutil          # 对应 import psutil (用于遍历游戏进程)
 # 键鼠模拟与监听
 keyboard        # 对应 import keyboard
 pydirectinput   # 对应 import pydirectinput (DirectX 级按键)
+
+# 网络本地请求
+requests
+urllib3
