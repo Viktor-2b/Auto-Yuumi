@@ -75,7 +75,6 @@ ACTION_CONFIG: dict = {
     'R': {'start': 150.0, 'end': 60.0, 'delay': 480.0, 'condition': 'low_health', 'radius': [50, 150]},
     'SUMMONER_HEAL': {'start': 200.0, 'end': 60.0, 'delay': 180.0, 'condition': 'low_health', 'radius': [0, 10]},
     'SUMMONER_EXHAUST': {'start': 20.0, 'end': 5.0, 'delay': 0.0, 'condition': 'none', 'radius': [50, 150]},
-    'MOVE': {'start': 4.0, 'end': 4.0, 'delay': 0.0, 'condition': 'none', 'radius': [50, 100]},
     'WARD_AUX_EQUIP': {'start': 50.0, 'end': 30.0, 'delay': 300.0, 'condition': 'none', 'radius': [60, 120]},
     'WARD_ACCESSORY': {'start': 100.0, 'end': 50.0, 'delay': 120.0, 'condition': 'none', 'radius': [60, 120]},
 }
@@ -137,6 +136,77 @@ def get_mouse_pos():
     return pt.x, pt.y
 
 
+def human_move(dest_x, dest_y, duration_min=0.1, duration_max=0.3):
+    """
+    基于三次贝塞尔曲线(Cubic Bézier Curve)的仿生鼠标移动
+    """
+    start_x, start_y = get_mouse_pos()
+    distance = math.hypot(dest_x - start_x, dest_y - start_y)
+
+    # 目标点加入正态分布的微小偏差
+    dest_x += int(random.gauss(0, 3))
+    dest_y += int(random.gauss(0, 3))
+
+    if distance < 10:
+        pydirectinput.moveTo(dest_x, dest_y)
+        return
+
+    # 生成两个随机的控制点，使得轨迹变成一条随机弧线
+    # 控制点在起点和终点连线的两侧随机偏移
+    offset = distance * 0.3
+    p1_x = int(start_x + (dest_x - start_x) * 0.33 + random.uniform(-offset, offset))
+    p1_y = int(start_y + (dest_y - start_y) * 0.33 + random.uniform(-offset, offset))
+
+    p2_x = int(start_x + (dest_x - start_x) * 0.66 + random.uniform(-offset, offset))
+    p2_y = int(start_y + (dest_y - start_y) * 0.66 + random.uniform(-offset, offset))
+
+    # 动态步数和总时间
+    steps = int(max(15, min(distance / 10, 50)))
+    total_time = random.uniform(duration_min, duration_max)
+    sleep_per_step = total_time / steps
+
+    for i in range(steps):
+        t = i / float(steps)
+        # Ease-Out 缓动算法，模拟人手快到目标时的减速
+        ease_t = 1 - math.pow(1 - t, 3)
+
+        # 三次贝塞尔曲线公式求解当前坐标
+        u = 1 - ease_t
+        cur_x = int(u ** 3 * start_x + 3 * u ** 2 * ease_t * p1_x + 3 * u * ease_t ** 2 * p2_x + ease_t ** 3 * dest_x)
+        cur_y = int(u ** 3 * start_y + 3 * u ** 2 * ease_t * p1_y + 3 * u * ease_t ** 2 * p2_y + ease_t ** 3 * dest_y)
+
+        # 叠加上高频微小手抖
+        wobble_x = random.randint(-1, 1)
+        wobble_y = random.randint(-1, 1)
+
+        pydirectinput.moveTo(cur_x + wobble_x, cur_y + wobble_y)
+        time.sleep(sleep_per_step)
+
+    # 最终确保精准落位
+    pydirectinput.moveTo(dest_x, dest_y)
+
+
+def human_click(button='left'):
+    """
+    仿生学鼠标点击：按压时间服从高斯正态分布
+    """
+    # 均值 0.06秒，标准差 0.015秒的按压时长 (极度逼近真人微动开关的数据)
+    hold_time = max(0.02, random.gauss(0.06, 0.015))
+
+    pydirectinput.mouseDown(button=button)
+    time.sleep(hold_time)
+    pydirectinput.mouseUp(button=button)
+
+
+def human_keypress(key):
+    """
+    仿生学键盘按压：按键触底到回弹的停留时间服从高斯正态分布
+    """
+    hold_time = max(0.02, random.gauss(0.06, 0.015))
+    pydirectinput.keyDown(key)
+    time.sleep(hold_time)
+    pydirectinput.keyUp(key)
+
 def is_game_running(process_name):
     for proc in psutil.process_iter(['name']):
         try:
@@ -184,9 +254,9 @@ def level_up_skill(target_level):
     time.sleep(0.2)
 
     pydirectinput.keyDown('ctrl')
-    time.sleep(0.05)
-    pydirectinput.press(physical_key)
-    time.sleep(0.05)
+    time.sleep(max(0.02, random.gauss(0.05, 0.015)))  # 仿生按压延迟
+    human_keypress(physical_key)
+    time.sleep(max(0.02, random.gauss(0.05, 0.015)))  # 仿生回弹延迟
     pydirectinput.keyUp('ctrl')
     print(f"🔼 升级啦！当前等级 {target_level}，自动加点: {display_name}")
 
@@ -252,9 +322,9 @@ def visual_monitor_thread():
                     # 如果等级框全白（二值化反转后全白，说明原图UI消失了），说明游戏退出了结算
                     if game_state['current_level'] > 0 and np.mean(final_lvl) >= 250.0:
                         print(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到等级框全白，游戏结束，点击屏幕中心退出！")
-                        pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
+                        human_move(game_state['center_x'], game_state['center_y'])
                         time.sleep(0.1)
-                        pydirectinput.click()
+                        human_click('left')
                         time.sleep(1.5)  # 休眠一会，避免疯狂连点
                         game_state['current_level'] = 0
                         game_state['is_paused'] = True
@@ -288,26 +358,22 @@ def visual_monitor_thread():
                                         "⚠️ [警告] 初始亮度偏高，若您是在附身状态下启动的脚本，校准可能会产生偏差！建议下车后重启脚本。")
 
                                 # 1. 中心点聚焦点击 (拆分按下与松开)
-                                pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
+                                human_move(game_state['center_x'], game_state['center_y'])
                                 time.sleep(0.1)
-                                pydirectinput.mouseDown()
-                                time.sleep(0.05)
-                                pydirectinput.mouseUp()
+                                human_click('left')
                                 print("🖱️ 已点击屏幕中心聚焦游戏窗口")
                                 time.sleep(0.5)
 
-                                pydirectinput.press('y')
+                                human_keypress('y')
                                 print("👁️ 已自动按下 Y 键锁定视角")
                                 time.sleep(0.5)
 
                                 # 2. 分路选择点击 (拆分按下与松开)
                                 role_x = client_point[0] + 675
                                 role_y = client_point[1] + 650
-                                pydirectinput.moveTo(role_x, role_y)
+                                human_move(role_x, role_y)
                                 time.sleep(0.1)
-                                pydirectinput.mouseDown()
-                                time.sleep(0.05)
-                                pydirectinput.mouseUp()
+                                human_click('left')
                                 print("🎯 已自动点击分路任务 (辅助位置)")
 
                                 game_state['current_level'] = read_level
@@ -414,21 +480,19 @@ def visual_monitor_thread():
                                     time.time() - game_state.get('last_shop_time', 0.0) > 30.0):
                                 print(f"\n[{time.strftime('%H:%M:%S')}] 🏠 检测到商城点亮(在泉水中)，执行自动购买！")
                                 game_state['is_paused'] = True
-
-                                pydirectinput.press('p')
+                                game_state['exclusive_mouse_until'] = time.time() + 4.0
+                                human_keypress('p')
                                 time.sleep(0.5)
 
-                                pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
+                                human_move(game_state['center_x'], game_state['center_y'])
                                 time.sleep(0.1)
                                 for i in range(2):
-                                    pydirectinput.mouseDown(button='right')
-                                    time.sleep(0.05)
-                                    pydirectinput.mouseUp(button='right')
+                                    human_click('right')
                                     time.sleep(0.5)
                                 print("💰 装备购买完成")
                                 time.sleep(0.2)
 
-                                pydirectinput.press('p')
+                                human_keypress('p')
                                 time.sleep(0.5)
 
                                 game_state['has_shopped_this_visit'] = True
@@ -459,7 +523,7 @@ def visual_monitor_thread():
                                         current_time - game_state.get('last_manual_attach_time', 0.0) > 3.0):
                                     print(
                                         f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到野外意外脱落，按下B键紧急回城！")
-                                    pydirectinput.press('b')
+                                    human_keypress('b')
                                     game_state['last_recall_time'] = current_time
 
                             if game_state['attach_x'] and game_state['attach_y']:
@@ -468,11 +532,12 @@ def visual_monitor_thread():
                                     if current_time - game_state['last_auto_attach_time'] > 5.0:
                                         print(
                                             f"[{time.strftime('%H:%M:%S')}] 🔗 尝试自动附身到队友 {game_state['attached_teammate_index'] + 1}...")
-                                        pydirectinput.moveTo(game_state['attach_x'], game_state['attach_y'])
+                                        game_state['exclusive_mouse_until'] = time.time() + 1.5
+                                        human_move(game_state['attach_x'], game_state['attach_y'])
                                         time.sleep(0.1)
 
                                         game_state['is_simulating_attach'] = True
-                                        pydirectinput.press(KEY_BINDINGS['W'])
+                                        human_keypress(KEY_BINDINGS['W'])
                                         time.sleep(0.1)
                                         game_state['is_simulating_attach'] = False
 
@@ -482,11 +547,9 @@ def visual_monitor_thread():
                                 print(f"[{time.strftime('%H:%M:%S')}] 📈 判定已成功附身，恢复动作循环！")
                                 game_state['is_paused'] = False
                                 # 成功上车后，立即将鼠标移回屏幕中间，并点一下右键
-                                pydirectinput.moveTo(game_state['center_x'], game_state['center_y'])
+                                human_move(game_state['center_x'], game_state['center_y'])
                                 time.sleep(0.05)
-                                pydirectinput.mouseDown(button='right')
-                                time.sleep(0.05)
-                                pydirectinput.mouseUp(button='right')
+                                human_click('right')
                         # ---- 血条状态处理 (动态追踪) ----
                         # 读取当前记录的队友索引，计算他专属的血条坐标
                         current_teammate_idx = game_state['attached_teammate_index']
@@ -533,7 +596,7 @@ def visual_monitor_thread():
                                     physical_key = KEY_BINDINGS[action_name]
                                     display_name = DISPLAY_NAMES.get(action_name, action_name)
 
-                                    pydirectinput.press(physical_key)
+                                    human_keypress(physical_key)
                                     print(
                                         f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(冷却: {current_cd:.1f}s)")
 
@@ -643,31 +706,12 @@ def action_worker(action_name, config, start_offset):
 
                 # 主坐标先过一次安检
                 rx, ry = enforce_safe_zone(rx, ry)
-
-                if physical_key == 'right_click':
-                    # 模拟真人狂点右键的习惯：随机点 2 到 5 下
-                    click_times = random.randint(2, 5)
-                    lock_duration = click_times * 0.25
-                    game_state['exclusive_mouse_until'] = time.time() + lock_duration
-                    for _ in range(click_times):
-                        # 在原始落点附近，加上 -20 到 20 像素的微小抖动偏移
-                        offset_x = rx + random.randint(-20, 20)
-                        offset_y = ry + random.randint(-20, 20)
-                        offset_x, offset_y = enforce_safe_zone(offset_x, offset_y)
-                        pydirectinput.moveTo(offset_x, offset_y)
-                        time.sleep(random.uniform(0.02, 0.05))  # 鼠标移动后的微小停顿
-                        pydirectinput.mouseDown(button='right')
-                        time.sleep(random.uniform(0.02, 0.06))  # 按下到松开的时间
-                        pydirectinput.mouseUp(button='right')
-
-                        # 两次点击之间的间隔 (极速连点)
-                        time.sleep(random.uniform(0.05, 0.15))
-                else:
-                    pydirectinput.moveTo(rx, ry)
-                    time.sleep(0.05)
-                    pydirectinput.press(physical_key)
-                    if action_name == 'Q':  # 如果是 Q 技能，释放后锁死所有其他鼠标线程 2 秒
-                        game_state['exclusive_mouse_until'] = time.time() + 2.0
+                game_state['exclusive_mouse_until'] = time.time() + 1.5
+                human_move(rx, ry)
+                time.sleep(0.05)
+                human_keypress(physical_key)
+                if action_name == 'Q':  # 如果是 Q 技能，释放后锁死所有其他鼠标线程 2 秒
+                    game_state['exclusive_mouse_until'] = time.time() + 2.0
 
                 msg = f"[{time.strftime('%H:%M:%S')}] 触发 {display_name} (距上次 {next_interval:.2f}s)"
                 if condition == 'low_health':
@@ -680,7 +724,7 @@ def action_worker(action_name, config, start_offset):
                     config['end'],
                     config['start'] - ((config['start'] - config['end']) / TRANSITION_TIME) * active_elapsed_time
                 )
-                next_interval = random.uniform(base_interval - 0.5, base_interval + 0.5)
+                next_interval = max(config['end'], random.gauss(base_interval, 0.5))
         else:
             if not game_state['is_running']:
                 session_started = False
@@ -734,6 +778,35 @@ def on_manual_attach(event):
             f"\n[按键捕捉] 手动按下 {str(event.name).upper()} 键！已吸附队友 {closest_index + 1} 坐标: {closest_pos}\n")
 
 
+def idle_mouse_worker():
+    """
+    低优先级发呆滑鼠线程：模拟真人玩家附身时的无聊乱晃
+    """
+    while True:
+        # 如果游戏没运行、正在买东西暂停、或者鼠标被其他技能霸占，就静静等待
+        if not game_state['is_running'] or game_state['is_paused'] or time.time() < game_state.get(
+                'exclusive_mouse_until', 0.0):
+            time.sleep(1.0)
+            continue
+
+        # 悠米专属：如果确定在附身状态且没有事干，有 30% 概率触发一次鼠标乱晃
+        if game_state['current_level'] > 0 and random.random() < 0.3:
+            # 霸占鼠标互斥锁，防止晃动到一半时 Q 技能突然抢鼠标
+            game_state['exclusive_mouse_until'] = time.time() + 1.0
+
+            # 在屏幕中心附近随机生成一个闲逛坐标
+            rx = int(game_state['center_x'] + random.uniform(-400, 400))
+            ry = int(game_state['center_y'] + random.uniform(-300, 300))
+
+            # 缓慢而慵懒地滑过去 (耗时 0.4 到 0.8 秒)
+            human_move(rx, ry, duration_min=0.4, duration_max=0.8)
+
+            # 晃完之后，偶尔会有真人的发呆停顿 (0.5 到 3 秒不动)
+            time.sleep(random.uniform(0.5, 3.0))
+
+        # 线程循环检测间隔
+        time.sleep(random.uniform(1.0, 2.5))
+
 def main_controller():
     print("🤖 悠米专属高级自动化脚本已启动...")
     print("提示：按 [Ctrl + C] 终止。\n")
@@ -749,6 +822,8 @@ def main_controller():
         t = threading.Thread(target=action_worker, args=(action, config, offset), daemon=True)
         t.start()
         offset += 1.2
+    idle_thread = threading.Thread(target=idle_mouse_worker, daemon=True)
+    idle_thread.start()
 
     try:
         while True:
@@ -796,19 +871,19 @@ def main_controller():
                     time.sleep(2.0)
                     skip_x = new_x + win_w // 2
                     skip_y = win_h - 55
-                    pydirectinput.moveTo(skip_x, skip_y)
+                    human_move(skip_x, skip_y)
                     time.sleep(0.5)
-                    pydirectinput.click()
+                    human_click('left')
                     print("⏭️ 已点击跳过结算动画")
 
                     # 3. 移动鼠标到大厅底部左侧位置并连续点击，触发 LeagueAkari 所需的重新匹配
                     time.sleep(3.0)
-                    target_x = new_x + win_w // 2 - 100
+                    target_x = new_x + win_w // 2 - 80
                     target_y = win_h - 40
-                    pydirectinput.moveTo(target_x, target_y)
+                    human_move(target_x, target_y)
                     for i in range(5):
                         time.sleep(2.5)
-                        pydirectinput.click()
+                        human_click('left')
 
                     print("🖱️ 已点击大厅底部中央，准备衔接 LeagueAkari 自动匹配！")
 
