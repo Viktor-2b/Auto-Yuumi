@@ -146,7 +146,7 @@ def get_mouse_pos():
     return pt.x, pt.y
 
 
-def human_move(dest_x, dest_y, duration_min=0.01, duration_max=0.04):
+def human_move(dest_x, dest_y, duration_min=0.01, duration_max=0.04, safe_zone=False):
     """
     基于三次贝塞尔曲线(Cubic Bézier Curve)的仿生鼠标移动
     """
@@ -161,6 +161,8 @@ def human_move(dest_x, dest_y, duration_min=0.01, duration_max=0.04):
         base_x, base_y, win_w, win_h = 0, 0, 1024, 768
 
     def enforce_safe_zone(cx, cy):
+        if not safe_zone:
+            return cx, cy
         r1_left, r1_top = base_x + int(win_w * RATIO_ZONE1[0]), base_y + int(win_h * RATIO_ZONE1[1])
         r1_right, r1_bottom = base_x + win_w, base_y + int(win_h * RATIO_ZONE1[2])
 
@@ -722,7 +724,7 @@ def action_worker(action_name, config, start_offset):
 
                 game_state['exclusive_mouse_until'] = time.time() + 1.5
                 with mouse_lock:
-                    human_move(rx, ry)
+                    human_move(rx, ry, safe_zone=True)
                     time.sleep(0.05)
                     human_keypress(physical_key)
                 if action_name == 'Q':  # 如果是 Q 技能，释放后锁死所有其他鼠标线程 2 秒
@@ -814,7 +816,7 @@ def idle_mouse_worker():
 
             # 缓慢而慵懒地滑过去 (耗时 0.4 到 0.8 秒)
             with mouse_lock:
-                human_move(rx, ry, duration_min=0.4, duration_max=0.8)
+                human_move(rx, ry, duration_min=0.4, duration_max=0.8, safe_zone=True)
 
             # 晃完之后，偶尔会有真人的发呆停顿 (0.5 到 3 秒不动)
             time.sleep(random.uniform(0.5, 3.0))
