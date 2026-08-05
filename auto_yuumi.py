@@ -344,6 +344,7 @@ def visual_monitor_thread():
                     # 检查是否出现游戏结束事件 (GameEnd)
                     events = data.get('events', {}).get('Events', [])
                     game_ended = any(e.get('EventName') == 'GameEnd' for e in events)
+                    game_started = any(e.get('EventName') == 'GameStart' for e in events)
 
                     if game_ended and game_state['current_level'] > 0:
                         print(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到 GameEnd 事件，游戏结束，点击屏幕中心退出！")
@@ -362,7 +363,7 @@ def visual_monitor_thread():
                     # 提取自己当前的技能极速
                     champ_stats = active_player.get('championStats', {})
                     game_state['abilityHaste'] = champ_stats.get('abilityHaste', 0.0)
-                    if 0 < read_level <= 18:
+                    if 0 < read_level <= 18 and game_started:
                         if game_state['current_level'] == 0:
                             print(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
                             # 开局直接标记为已购买
@@ -865,9 +866,10 @@ def main_controller():
                 game_state['window_moved'] = False
                 game_state['has_shopped_this_visit'] = False
                 print(f"\n[{time.strftime('%H:%M:%S')}] 🎮 游戏进程启动！等待进入游戏界面...")
-
+                time.sleep(1.0)
+                if move_window_to_top_right():
+                    game_state['window_moved'] = True
             elif running and game_state['is_running'] and not game_state['window_moved']:
-                time.sleep(3)
                 if move_window_to_top_right():
                     game_state['window_moved'] = True
 
