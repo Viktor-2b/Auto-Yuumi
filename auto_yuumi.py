@@ -41,6 +41,7 @@ pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tessera
 TARGET_PROCESS_NAME = "League of Legends.exe"
 WINDOW_NAME = "League of Legends (TM) Client"
 TRANSITION_TIME = 1600.0
+mouse_lock = threading.Lock()
 
 # 键位绑定
 KEY_BINDINGS = {
@@ -123,7 +124,16 @@ COMMON_BOT_CHAMPIONS = [
     "远古巫灵", "奥术先驱", "星籁歌姬", "异画师", "魔蛇之拥", "暗黑元首", "邪恶小法师", "诺克萨斯统领", "虚空之眼",
     "岩雀", "光辉女郎", "爆破鬼才", "解脱者", "死亡颂唱者", "猩红收割者", "铸星龙王", "流光镜影"
 ]
-
+# 分辨率比例常量
+RATIO_LVL = (0.3027, 0.9687, 0.0127, 0.0169)       # 等级框 (X比例, Y比例, 宽比例, 高比例)
+RATIO_W = (0.4043, 0.8984, 0.0352, 0.0469)         # W技能框
+RATIO_SHOP = (0.5967, 0.9713, 0.0195, 0.0208)      # 商店框
+RATIO_ROLE = (0.6592, 0.8463)                      # 分路任务点击 (X, Y)
+RATIO_ATTACH_Y = 0.6575                            # 队友头像Y坐标
+RATIO_TEAMMATE_X = [0.8203, 0.8730, 0.9228, 0.9726]# 四个队友头像X坐标
+RATIO_HP_Y_W_H = (0.6836, 0.0097, 0.0078)          # 血条探测框 (Y, W, H)
+RATIO_ZONE1 = (0.7812, 0.6250, 0.7421)             # 禁区1右侧血条 (left_x, top_y, bottom_y)
+RATIO_ZONE2 = (0.2734, 0.8593, 0.7226)             # 禁区2底部OCR (left_x, top_y, right_x)
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
@@ -136,23 +146,46 @@ def get_mouse_pos():
     return pt.x, pt.y
 
 
-def human_move(dest_x, dest_y, duration_min=0.1, duration_max=0.3):
+def human_move(dest_x, dest_y, duration_min=0.01, duration_max=0.04):
     """
     基于三次贝塞尔曲线(Cubic Bézier Curve)的仿生鼠标移动
     """
     start_x, start_y = get_mouse_pos()
+    hwnd = win32gui.FindWindow(None, WINDOW_NAME)
+    if hwnd:
+        client_pt = win32gui.ClientToScreen(hwnd, (0, 0))
+        rect = win32gui.GetClientRect(hwnd)
+        base_x, base_y = client_pt[0], client_pt[1]
+        win_w, win_h = rect[2], rect[3]
+    else:
+        base_x, base_y, win_w, win_h = 0, 0, 1024, 768
+
+    def enforce_safe_zone(cx, cy):
+        r1_left, r1_top = base_x + int(win_w * RATIO_ZONE1[0]), base_y + int(win_h * RATIO_ZONE1[1])
+        r1_right, r1_bottom = base_x + win_w, base_y + int(win_h * RATIO_ZONE1[2])
+
+        r2_left, r2_top = base_x + int(win_w * RATIO_ZONE2[0]), base_y + int(win_h * RATIO_ZONE2[1])
+        r2_right, r2_bottom = base_x + int(win_w * RATIO_ZONE2[2]), base_y + win_h
+
+        if r1_left <= cx <= r1_right and r1_top <= cy <= r1_bottom:
+            cx = r1_left - 5
+        if r2_left <= cx <= r2_right and r2_top <= cy <= r2_bottom:
+            cy = r2_top - 5
+        return cx, cy
+
     distance = math.hypot(dest_x - start_x, dest_y - start_y)
 
     # 目标点加入正态分布的微小偏差
     dest_x += int(random.gauss(0, 3))
     dest_y += int(random.gauss(0, 3))
+    dest_x, dest_y = enforce_safe_zone(dest_x, dest_y)
 
+    distance = math.hypot(dest_x - start_x, dest_y - start_y)
     if distance < 10:
         pydirectinput.moveTo(dest_x, dest_y)
         return
 
-    # 生成两个随机的控制点，使得轨迹变成一条随机弧线
-    # 控制点在起点和终点连线的两侧随机偏移
+    # 生成两个随机的控制点，使得轨迹变成一条随机弧线。控制点在起点和终点连线的两侧随机偏移
     offset = distance * 0.3
     p1_x = int(start_x + (dest_x - start_x) * 0.33 + random.uniform(-offset, offset))
     p1_y = int(start_y + (dest_y - start_y) * 0.33 + random.uniform(-offset, offset))
@@ -161,7 +194,7 @@ def human_move(dest_x, dest_y, duration_min=0.1, duration_max=0.3):
     p2_y = int(start_y + (dest_y - start_y) * 0.66 + random.uniform(-offset, offset))
 
     # 动态步数和总时间
-    steps = int(max(15, min(distance / 10, 50)))
+    steps = int(max(5, min(distance / 25, 20)))
     total_time = random.uniform(duration_min, duration_max)
     sleep_per_step = total_time / steps
 
@@ -179,7 +212,8 @@ def human_move(dest_x, dest_y, duration_min=0.1, duration_max=0.3):
         wobble_x = random.randint(-1, 1)
         wobble_y = random.randint(-1, 1)
 
-        pydirectinput.moveTo(cur_x + wobble_x, cur_y + wobble_y)
+        final_x, final_y = enforce_safe_zone(cur_x + wobble_x, cur_y + wobble_y)
+        pydirectinput.moveTo(final_x, final_y)
         time.sleep(sleep_per_step)
 
     # 最终确保精准落位
@@ -253,11 +287,12 @@ def level_up_skill(target_level):
     game_state['exclusive_mouse_until'] = time.time() + 1.0
     time.sleep(0.2)
 
-    pydirectinput.keyDown('ctrl')
-    time.sleep(max(0.02, random.gauss(0.05, 0.015)))  # 仿生按压延迟
-    human_keypress(physical_key)
-    time.sleep(max(0.02, random.gauss(0.05, 0.015)))  # 仿生回弹延迟
-    pydirectinput.keyUp('ctrl')
+    with mouse_lock:
+        pydirectinput.keyDown('ctrl')
+        time.sleep(max(0.02, random.gauss(0.05, 0.015)))  # 仿生按压延迟
+        human_keypress(physical_key)
+        time.sleep(max(0.02, random.gauss(0.05, 0.015)))  # 仿生回弹延迟
+        pydirectinput.keyUp('ctrl')
     print(f"🔼 升级啦！当前等级 {target_level}，自动加点: {display_name}")
 
 
@@ -281,23 +316,26 @@ def visual_monitor_thread():
                     continue
 
                 client_point = win32gui.ClientToScreen(hwnd, (0, 0))
+                client_rect = win32gui.GetClientRect(hwnd)
+                win_w, win_h = client_rect[2], client_rect[3]
 
                 # ================= 区域坐标计算 =================
-                abs_x_lvl = client_point[0] + 310
-                abs_y_lvl = client_point[1] + 744
-                level_region = {'top': abs_y_lvl, 'left': abs_x_lvl, 'width': 13, 'height': 13}
+                abs_x_lvl = client_point[0] + int(win_w * RATIO_LVL[0])
+                abs_y_lvl = client_point[1] + int(win_h * RATIO_LVL[1])
+                level_region = {'top': abs_y_lvl, 'left': abs_x_lvl, 'width': int(win_w * RATIO_LVL[2]), 'height': int(win_h * RATIO_LVL[3])}
 
-                abs_x_w = client_point[0] + 414
-                abs_y_w = client_point[1] + 690
-                w_region = {'top': abs_y_w, 'left': abs_x_w, 'width': 36, 'height': 36}
+                abs_x_w = client_point[0] + int(win_w * RATIO_W[0])
+                abs_y_w = client_point[1] + int(win_h * RATIO_W[1])
+                w_region = {'top': abs_y_w, 'left': abs_x_w, 'width': int(win_w * RATIO_W[2]), 'height': int(win_h * RATIO_W[3])}
 
-                # 商城图标区域 (X:611~694, Y:746~762 => width:83, height:16)
                 shop_region = {
-                    'top': client_point[1] + 746,
-                    'left': client_point[0] + 611,
-                    'width': 20,
-                    'height': 16
+                    'top': client_point[1] + int(win_h * RATIO_SHOP[1]),
+                    'left': client_point[0] + int(win_w * RATIO_SHOP[0]),
+                    'width': int(win_w * RATIO_SHOP[2]),
+                    'height': int(win_h * RATIO_SHOP[3])
                 }
+
+                teammate_x_list = [int(win_w * rx) for rx in RATIO_TEAMMATE_X]
 
                 with mss.MSS() as sct:
                     # ---- 等级处理 ----
@@ -322,9 +360,10 @@ def visual_monitor_thread():
                     # 如果等级框全白（二值化反转后全白，说明原图UI消失了），说明游戏退出了结算
                     if game_state['current_level'] > 0 and np.mean(final_lvl) >= 250.0:
                         print(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到等级框全白，游戏结束，点击屏幕中心退出！")
-                        human_move(game_state['center_x'], game_state['center_y'])
-                        time.sleep(0.1)
-                        human_click('left')
+                        with mouse_lock:
+                            human_move(game_state['center_x'], game_state['center_y'])
+                            time.sleep(0.1)
+                            human_click('left')
                         time.sleep(1.5)  # 休眠一会，避免疯狂连点
                         game_state['current_level'] = 0
                         game_state['is_paused'] = True
@@ -358,22 +397,25 @@ def visual_monitor_thread():
                                         "⚠️ [警告] 初始亮度偏高，若您是在附身状态下启动的脚本，校准可能会产生偏差！建议下车后重启脚本。")
 
                                 # 1. 中心点聚焦点击 (拆分按下与松开)
-                                human_move(game_state['center_x'], game_state['center_y'])
-                                time.sleep(0.1)
-                                human_click('left')
+                                with mouse_lock:
+                                    human_move(game_state['center_x'], game_state['center_y'])
+                                    time.sleep(0.1)
+                                    human_click('left')
                                 print("🖱️ 已点击屏幕中心聚焦游戏窗口")
                                 time.sleep(0.5)
 
-                                human_keypress('y')
+                                with mouse_lock:
+                                    human_keypress('y')
                                 print("👁️ 已自动按下 Y 键锁定视角")
                                 time.sleep(0.5)
 
                                 # 2. 分路选择点击 (拆分按下与松开)
                                 role_x = client_point[0] + 675
                                 role_y = client_point[1] + 650
-                                human_move(role_x, role_y)
-                                time.sleep(0.1)
-                                human_click('left')
+                                with mouse_lock:
+                                    human_move(role_x, role_y)
+                                    time.sleep(0.1)
+                                    human_click('left')
                                 print("🎯 已自动点击分路任务 (辅助位置)")
 
                                 game_state['current_level'] = read_level
@@ -453,7 +495,7 @@ def visual_monitor_thread():
                                                 target_idx].get('summonerName')
                                             game_state['attached_teammate_index'] = target_idx
                                             game_state['attach_x'] = client_point[0] + teammate_x_list[target_idx]
-                                            game_state['attach_y'] = client_point[1] + 505
+                                            game_state['attach_y'] = client_point[1] + int(win_h * RATIO_ATTACH_Y)
                                             print(f"🎯 锁定跟随目标: [{target_name}] (UI 第 {target_idx + 1} 位) 锁定原因: {target_reason}")
 
                                         else:
@@ -481,18 +523,19 @@ def visual_monitor_thread():
                                 print(f"\n[{time.strftime('%H:%M:%S')}] 🏠 检测到商城点亮(在泉水中)，执行自动购买！")
                                 game_state['is_paused'] = True
                                 game_state['exclusive_mouse_until'] = time.time() + 4.0
-                                human_keypress('p')
-                                time.sleep(0.5)
-
-                                human_move(game_state['center_x'], game_state['center_y'])
-                                time.sleep(0.1)
-                                for i in range(2):
-                                    human_click('right')
+                                with mouse_lock:
+                                    human_keypress('p')
                                     time.sleep(0.5)
+                                    human_move(game_state['center_x'], game_state['center_y'])
+                                    time.sleep(0.1)
+                                    for i in range(2):
+                                        human_click('right')
+                                        time.sleep(0.5)
                                 print("💰 装备购买完成")
                                 time.sleep(0.2)
 
-                                human_keypress('p')
+                                with mouse_lock:
+                                    human_keypress('p')
                                 time.sleep(0.5)
 
                                 game_state['has_shopped_this_visit'] = True
@@ -521,9 +564,9 @@ def visual_monitor_thread():
                                 # 紧急判断：如果不在泉水，且距离上次手动按A超过3秒（排除玩家正常换人），说明是队友阵亡
                                 if not is_in_base and (
                                         current_time - game_state.get('last_manual_attach_time', 0.0) > 3.0):
-                                    print(
-                                        f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到野外意外脱落，按下B键紧急回城！")
-                                    human_keypress('b')
+                                    print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到野外意外脱落，按下B键紧急回城！")
+                                    with mouse_lock:
+                                        human_keypress('b')
                                     game_state['last_recall_time'] = current_time
 
                             if game_state['attach_x'] and game_state['attach_y']:
@@ -533,11 +576,11 @@ def visual_monitor_thread():
                                         print(
                                             f"[{time.strftime('%H:%M:%S')}] 🔗 尝试自动附身到队友 {game_state['attached_teammate_index'] + 1}...")
                                         game_state['exclusive_mouse_until'] = time.time() + 1.5
-                                        human_move(game_state['attach_x'], game_state['attach_y'])
-                                        time.sleep(0.1)
-
                                         game_state['is_simulating_attach'] = True
-                                        human_keypress(KEY_BINDINGS['W'])
+                                        with mouse_lock:
+                                            human_move(game_state['attach_x'], game_state['attach_y'])
+                                            time.sleep(0.1)
+                                            human_keypress(KEY_BINDINGS['W'])
                                         time.sleep(0.1)
                                         game_state['is_simulating_attach'] = False
 
@@ -547,9 +590,10 @@ def visual_monitor_thread():
                                 print(f"[{time.strftime('%H:%M:%S')}] 📈 判定已成功附身，恢复动作循环！")
                                 game_state['is_paused'] = False
                                 # 成功上车后，立即将鼠标移回屏幕中间，并点一下右键
-                                human_move(game_state['center_x'], game_state['center_y'])
-                                time.sleep(0.05)
-                                human_click('right')
+                                with mouse_lock:
+                                    human_move(game_state['center_x'], game_state['center_y'])
+                                    time.sleep(0.05)
+                                    human_click('right')
                         # ---- 血条状态处理 (动态追踪) ----
                         # 读取当前记录的队友索引，计算他专属的血条坐标
                         current_teammate_idx = game_state['attached_teammate_index']
@@ -560,12 +604,12 @@ def visual_monitor_thread():
 
                         # 原始X中心加上偏移量，提前探测掉血
                         hp_center_x = client_point[0] + teammate_x_list[current_teammate_idx] + shift_x
-                        # Y 轴取528，高度6；X 轴取中心点左右各 5 像素 (width=10)，组成一个探测框
+                        hp_w = int(win_w * RATIO_HP_Y_W_H[1])
                         health_region = {
-                            'top': client_point[1] + 525,
-                            'left': hp_center_x - 5,
-                            'width': 10,
-                            'height': 6
+                            'top': client_point[1] + int(win_h * RATIO_HP_Y_W_H[0]),
+                            'left': hp_center_x - (hp_w // 2),
+                            'width': hp_w,
+                            'height': int(win_h * RATIO_HP_Y_W_H[2])
                         }
 
                         hp_img = np.array(sct.grab(health_region))
@@ -596,7 +640,8 @@ def visual_monitor_thread():
                                     physical_key = KEY_BINDINGS[action_name]
                                     display_name = DISPLAY_NAMES.get(action_name, action_name)
 
-                                    human_keypress(physical_key)
+                                    with mouse_lock:
+                                        human_keypress(physical_key)
                                     print(
                                         f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(冷却: {current_cd:.1f}s)")
 
@@ -674,42 +719,12 @@ def action_worker(action_name, config, start_offset):
 
                 rx = int(game_state['center_x'] + r * math.cos(theta))
                 ry = int(game_state['center_y'] + r * math.sin(theta))
-                # ========================================================
-                # 精准矩形禁区防误触 (相对坐标转绝对屏幕坐标)
-                # ========================================================
-                hwnd = win32gui.FindWindow(None, WINDOW_NAME)
-                if hwnd:
-                    client_pt = win32gui.ClientToScreen(hwnd, (0, 0))
-                    rect = win32gui.GetClientRect(hwnd)
-                    win_w, win_h = rect[2], rect[3]
-                    base_x, base_y = client_pt[0], client_pt[1]
-                else:
-                    # 备用回退机制
-                    base_x, base_y = game_state['center_x'] - 512, game_state['center_y'] - 384
-                    win_w, win_h = 1024, 768
 
-                # 禁区 1 (右侧队友血条) 转换为屏幕绝对坐标
-                r1_left, r1_top = base_x + 800, base_y + 480
-                r1_right, r1_bottom = base_x + win_w, base_y + 570
-
-                # 禁区 2 (底部 OCR 识图区) 转换为屏幕绝对坐标
-                r2_left, r2_top = base_x + 280, base_y + 660
-                r2_right, r2_bottom = base_x + 740, base_y + win_h
-
-                # 碰撞检测过滤函数：如果掉进禁区，强行把它推出来
-                def enforce_safe_zone(cx, cy):
-                    if r1_left <= cx <= r1_right and r1_top <= cy <= r1_bottom:
-                        cx = r1_left - 3  # 从左边弹出去
-                    if r2_left <= cx <= r2_right and r2_top <= cy <= r2_bottom:
-                        cy = r2_top - 3  # 从上面弹出去
-                    return cx, cy
-
-                # 主坐标先过一次安检
-                rx, ry = enforce_safe_zone(rx, ry)
                 game_state['exclusive_mouse_until'] = time.time() + 1.5
-                human_move(rx, ry)
-                time.sleep(0.05)
-                human_keypress(physical_key)
+                with mouse_lock:
+                    human_move(rx, ry)
+                    time.sleep(0.05)
+                    human_keypress(physical_key)
                 if action_name == 'Q':  # 如果是 Q 技能，释放后锁死所有其他鼠标线程 2 秒
                     game_state['exclusive_mouse_until'] = time.time() + 2.0
 
@@ -743,14 +758,13 @@ def on_manual_attach(event):
     hwnd = win32gui.FindWindow(None, WINDOW_NAME)
     if not hwnd: return
     client_point = win32gui.ClientToScreen(hwnd, (0, 0))
+    client_rect = win32gui.GetClientRect(hwnd)
     base_x, base_y = client_point
+    win_w, win_h = client_rect[2], client_rect[3]
 
     # 填入你校准的4个队友头像相对中心点坐标
     teammate_rel_positions = [
-        (840, 505),  # 队友 1
-        (894, 505),  # 队友 2
-        (945, 505),  # 队友 3
-        (996, 505)  # 队友 4
+        (int(win_w * rx), int(win_h * RATIO_ATTACH_Y)) for rx in RATIO_TEAMMATE_X
     ]
 
     # 寻找距离鼠标最近的队友头像
@@ -799,7 +813,8 @@ def idle_mouse_worker():
             ry = int(game_state['center_y'] + random.uniform(-300, 300))
 
             # 缓慢而慵懒地滑过去 (耗时 0.4 到 0.8 秒)
-            human_move(rx, ry, duration_min=0.4, duration_max=0.8)
+            with mouse_lock:
+                human_move(rx, ry, duration_min=0.4, duration_max=0.8)
 
             # 晃完之后，偶尔会有真人的发呆停顿 (0.5 到 3 秒不动)
             time.sleep(random.uniform(0.5, 3.0))
@@ -871,19 +886,21 @@ def main_controller():
                     time.sleep(2.0)
                     skip_x = new_x + win_w // 2
                     skip_y = win_h - 55
-                    human_move(skip_x, skip_y)
-                    time.sleep(0.5)
-                    human_click('left')
+                    with mouse_lock:
+                        human_move(skip_x, skip_y)
+                        time.sleep(0.5)
+                        human_click('left')
                     print("⏭️ 已点击跳过结算动画")
 
                     # 3. 移动鼠标到大厅底部左侧位置并连续点击，触发 LeagueAkari 所需的重新匹配
                     time.sleep(3.0)
                     target_x = new_x + win_w // 2 - 80
                     target_y = win_h - 40
-                    human_move(target_x, target_y)
-                    for i in range(5):
-                        time.sleep(2.5)
-                        human_click('left')
+                    with mouse_lock:
+                        human_move(target_x, target_y)
+                        for i in range(5):
+                            time.sleep(2.5)
+                            human_click('left')
 
                     print("🖱️ 已点击大厅底部中央，准备衔接 LeagueAkari 自动匹配！")
 
