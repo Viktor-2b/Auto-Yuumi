@@ -428,7 +428,11 @@ def visual_monitor_thread():
 
                             game_state['current_level'] = read_level
                             level_up_skill(read_level)
-                            game_state['start_time'] = time.time()
+
+                            game_time = data.get('gameData', {}).get('gameTime', 0.0)
+
+                            game_state['start_time'] = time.time() - game_time
+                            log(f"⏱️ 游戏时间校准完成！当前对局已进行 {float(game_time) / 60:.1f} 分钟。")
 
                             # 1. 获取当前玩家名字
                             active_name = active_player.get('riotIdGameName') or active_player.get(
@@ -959,7 +963,7 @@ def main_controller():
 
                     # 3. 移动鼠标到大厅底部左侧位置并连续点击，触发 LeagueAkari 所需的重新匹配
                     time.sleep(3.0)
-                    target_x = new_x + win_w // 2 - 80
+                    target_x = new_x + win_w // 2 - 70
                     target_y = win_h - 40
                     with mouse_lock:
                         human_move(target_x, target_y)
