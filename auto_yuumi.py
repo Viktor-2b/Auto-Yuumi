@@ -370,7 +370,7 @@ def visual_monitor_thread():
                     game_started = any(e.get('EventName') == 'GameStart' for e in events)
 
                     if game_ended and game_state['current_level'] > 0:
-                        log(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到 GameEnd 事件，游戏结束，点击屏幕中心退出！")
+                        log(f"🛑 识别到 GameEnd 事件，游戏结束，点击屏幕中心退出！")
                         with mouse_lock:
                             human_move(game_state['center_x'], game_state['center_y'])
                             time.sleep(0.1)
@@ -517,7 +517,7 @@ def visual_monitor_thread():
                             if is_in_base:
                                 if not game_state['has_shopped_this_visit'] and (
                                         time.time() - game_state.get('last_shop_time', 0.0) > 30.0):
-                                    log(f"\n[{time.strftime('%H:%M:%S')}] 🏠 检测到商城点亮(在泉水中)，执行自动购买！")
+                                    log(f"🏠 检测到商城点亮(在泉水中)，执行自动购买！")
                                     game_state['is_paused'] = True
                                     game_state['exclusive_mouse_until'] = time.time() + 4.0
                                     with mouse_lock:
@@ -554,7 +554,7 @@ def visual_monitor_thread():
                                 if game_state.get('in_base_start_time', 0.0) == 0.0:
                                     game_state['in_base_start_time'] = current_time
                                 elif current_time - game_state['in_base_start_time'] > 40.0:
-                                    log(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到当前队友在泉水挂机！执行自动换乘...")
+                                    log(f"⚠️ 检测到当前队友在泉水挂机！执行自动换乘...")
                                     game_state['is_paused'] = True
                                     game_state['exclusive_mouse_until'] = time.time() + 2.0
                                     with mouse_lock:
@@ -583,13 +583,13 @@ def visual_monitor_thread():
 
                             if not is_attached:
                                 if not game_state['is_paused']:
-                                    log(f"[{time.strftime('%H:%M:%S')}] 📉 未附身/死亡，暂停其余动作循环！")
+                                    log(f"📉 未附身/死亡，暂停其余动作循环！")
                                     game_state['is_paused'] = True
 
                                     # 紧急判断：如果不在泉水，且距离上次手动按A超过3秒（排除玩家正常换人），说明是队友阵亡
                                     if not is_in_base and (
                                             current_time - game_state.get('last_manual_attach_time', 0.0) > 3.0):
-                                        log(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到野外意外脱落，按下B键紧急回城！")
+                                        log(f"⚠️ 检测到野外意外脱落，按下B键紧急回城！")
                                         with mouse_lock:
                                             human_keypress('b')
                                         game_state['last_recall_time'] = current_time
@@ -599,7 +599,7 @@ def visual_monitor_thread():
                                     if current_time - game_state.get('last_recall_time', 0.0) > 9.0:
                                         if current_time - game_state['last_auto_attach_time'] > 5.0:
                                             log(
-                                                f"[{time.strftime('%H:%M:%S')}] 🔗 尝试自动附身到队友 {game_state['attached_teammate_index'] + 1}...")
+                                                f"🔗 尝试自动附身到队友 {game_state['attached_teammate_index'] + 1}...")
                                             game_state['exclusive_mouse_until'] = time.time() + 1.5
                                             game_state['is_simulating_attach'] = True
                                             with mouse_lock:
@@ -612,7 +612,7 @@ def visual_monitor_thread():
                                             game_state['last_auto_attach_time'] = current_time
                             else:
                                 if game_state['is_paused'] and not is_in_base:  # 确保在泉水买东西时不要马上重置暂停状态
-                                    log(f"[{time.strftime('%H:%M:%S')}] 📈 判定已成功附身，恢复动作循环！")
+                                    log(f"📈 判定已成功附身，恢复动作循环！")
                                     game_state['is_paused'] = False
                                     # 成功上车后，立即将鼠标移回屏幕中间，并点一下右键
                                     with mouse_lock:
@@ -672,14 +672,14 @@ def visual_monitor_thread():
                                         with mouse_lock:
                                             human_keypress(physical_key)
                                         log(
-                                            f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(当前真实冷却: {float(current_cd):.1f}s)")
+                                            f"🚨 [紧急救援] 触发 {display_name}！(当前真实冷却: {float(current_cd):.1f}s)")
 
                                         game_state['last_cast'][action_name] = current_time
                                         time.sleep(0.1)
             except Exception as e:
                 log(f"视觉线程异常: {e}")
 
-        time.sleep(1.0)
+        time.sleep(0.2)
 
 
 def action_worker(action_name, config, start_offset):
@@ -736,7 +736,7 @@ def action_worker(action_name, config, start_offset):
                     active_start_time = current_time
                     next_interval = random.uniform(1.0, 3.0)
                     session_started = True
-                    log(f"[{time.strftime('%H:%M:%S')}] ⏳ {display_name} 达到启动时间！")
+                    log(f"⏳ {display_name} 达到启动时间！")
                 else:
                     time.sleep(0.5)
                     continue
@@ -782,7 +782,7 @@ def action_worker(action_name, config, start_offset):
                 if action_name == 'Q':  # 如果是 Q 技能，释放后锁死所有其他鼠标线程 2 秒
                     game_state['exclusive_mouse_until'] = time.time() + 2.0
 
-                msg = f"[{time.strftime('%H:%M:%S')}] 触发 {display_name} (距上次 {next_interval:.2f}s)"
+                msg = f"触发 {display_name} (距上次 {next_interval:.2f}s)"
                 if condition == 'low_health':
                     msg += " [⚠️队友残血触发]"
                 log(msg)
@@ -851,7 +851,7 @@ def on_manual_attach(event):
         game_state['last_auto_attach_time'] = time.time()
         game_state['last_manual_attach_time'] = time.time()
         log(
-            f"\n[按键捕捉] 手动按下 {str(event.name).upper()} 键！已吸附队友 {closest_index + 1} 坐标: {closest_pos}\n")
+            f"[按键捕捉] 手动按下 {str(event.name).upper()} 键！已吸附队友 {closest_index + 1} 坐标: {closest_pos}")
 
 
 def idle_mouse_worker():
@@ -887,7 +887,7 @@ def idle_mouse_worker():
 
 def main_controller():
     log("🤖 悠米专属高级自动化脚本已启动...")
-    log("提示：按 [Ctrl + F12] 终止。\n")
+    log("提示：按 [Ctrl + F12] 终止。")
 
     attach_key = KEY_BINDINGS.get('W', 'w')
     keyboard.on_press_key(attach_key, on_manual_attach)
@@ -915,7 +915,7 @@ def main_controller():
                 game_state['is_paused'] = False
                 game_state['window_moved'] = False
                 game_state['has_shopped_this_visit'] = False
-                log(f"\n[{time.strftime('%H:%M:%S')}] 🎮 游戏进程启动！等待进入游戏界面...")
+                log(f"🎮 游戏进程启动！等待进入游戏界面...")
                 time.sleep(1.0)
                 if move_window_to_top_right():
                     game_state['window_moved'] = True
@@ -928,7 +928,7 @@ def main_controller():
                 game_state['is_running'] = False
                 game_state['start_time'] = None
                 game_state['window_moved'] = False
-                log(f"\n[{time.strftime('%H:%M:%S')}] 🛑 游戏结束...")
+                log(f"🛑 游戏结束...")
 
                 # 寻找游戏大厅窗口，移动至右上角并双击底部
                 time.sleep(3.0)  # 给大厅一点弹出的缓冲时间
@@ -972,7 +972,7 @@ def main_controller():
             time.sleep(2.0)
 
     except KeyboardInterrupt:
-        log("\n⏹️ 接收到中断信号，脚本已安全停止。")
+        log("⏹️ 接收到中断信号，脚本已安全停止。")
 
 
 if __name__ == "__main__":
