@@ -4,6 +4,8 @@ import math
 import random
 import ctypes
 import threading
+import logging
+from logging.handlers import RotatingFileHandler
 
 import pydirectinput
 import keyboard
@@ -34,6 +36,23 @@ except (AttributeError, OSError):
 # 环境与全局配置
 # ==========================================
 os.makedirs("debug", exist_ok=True)
+
+log_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+log_file = os.path.join("debug", "yuumi_auto.log")
+file_handler = RotatingFileHandler(log_file, maxBytes=2*1024*1024, backupCount=3, encoding='utf-8')
+file_handler.setFormatter(log_formatter)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s', datefmt='%H:%M:%S'))
+
+logger = logging.getLogger('YuumiBot')
+logger.setLevel(logging.INFO)
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+def log(msg, level="info"):
+    if level == "info": logger.info(msg)
+    elif level == "warning": logger.warning(msg)
+    elif level == "error": logger.error(msg)
 
 TARGET_PROCESS_NAME = "League of Legends.exe"
 WINDOW_NAME = "League of Legends (TM) Client"
@@ -126,14 +145,15 @@ COMMON_BOT_CHAMPIONS = [
     "岩雀", "光辉女郎", "爆破鬼才", "解脱者", "死亡颂唱者", "猩红收割者", "铸星龙王", "流光镜影"
 ]
 # 分辨率比例常量
-RATIO_W = (0.4043, 0.8984, 0.0352, 0.0469)         # W技能框
-RATIO_SHOP = (0.5967, 0.9713, 0.0195, 0.0208)      # 商店框
-RATIO_ROLE = (0.6592, 0.8463)                      # 分路任务点击 (X, Y)
-RATIO_ATTACH_Y = 0.6575                            # 队友头像Y坐标
-RATIO_TEAMMATE_X = [0.8203, 0.8730, 0.9228, 0.9726]# 四个队友头像X坐标
-RATIO_HP_Y_W_H = (0.6836, 0.0097, 0.0078)          # 血条探测框 (Y, W, H)
-RATIO_ZONE1 = (0.7812, 0.6250, 0.7421)             # 禁区1右侧血条 (left_x, top_y, bottom_y)
-RATIO_ZONE2 = (0.2734, 0.8593, 0.7226)             # 禁区2底部OCR (left_x, top_y, right_x)
+RATIO_W = (0.4043, 0.8984, 0.0352, 0.0469)  # W技能框
+RATIO_SHOP = (0.5967, 0.9713, 0.0195, 0.0208)  # 商店框
+RATIO_ROLE = (0.6592, 0.8463)  # 分路任务点击 (X, Y)
+RATIO_ATTACH_Y = 0.6575  # 队友头像Y坐标
+RATIO_TEAMMATE_X = [0.8203, 0.8730, 0.9228, 0.9726]  # 四个队友头像X坐标
+RATIO_HP_Y_W_H = (0.6836, 0.0097, 0.0078)  # 血条探测框 (Y, W, H)
+RATIO_ZONE1 = (0.7812, 0.6250, 0.7421)  # 禁区1右侧血条 (left_x, top_y, bottom_y)
+RATIO_ZONE2 = (0.2734, 0.8593, 0.7226)  # 禁区2底部OCR (left_x, top_y, right_x)
+
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
@@ -174,7 +194,6 @@ def human_move(dest_x, dest_y, duration_min=0.01, duration_max=0.04, safe_zone=F
         if r2_left <= cx <= r2_right and r2_top <= cy <= r2_bottom:
             cy = r2_top - 5
         return cx, cy
-
 
     # 目标点加入正态分布的微小偏差
     dest_x = int(dest_x + random.gauss(0, 3))
@@ -242,6 +261,7 @@ def human_keypress(key):
     time.sleep(hold_time)
     pydirectinput.keyUp(key)
 
+
 def is_game_running():
     try:
         # 如果能获取到游戏基础数据且状态码200，说明已经进入召唤师峡谷
@@ -271,7 +291,7 @@ def move_window_to_top_right():
         game_state['center_x'] = client_point[0] + client_rect[2] // 2
         game_state['center_y'] = client_point[1] + client_rect[3] // 2
 
-        print(f"🪟 已将游戏窗口移动至右上角: ({new_x}, {new_y})")
+        log(f"🪟 已将游戏窗口移动至右上角: ({new_x}, {new_y})")
         return True
     return False
 
@@ -293,7 +313,7 @@ def level_up_skill(target_level):
         human_keypress(physical_key)
         time.sleep(max(0.02, random.gauss(0.05, 0.015)))  # 仿生回弹延迟
         pydirectinput.keyUp('ctrl')
-    print(f"🔼 升级啦！当前等级 {target_level}，自动加点: {display_name}")
+    log(f"🔼 升级啦！当前等级 {target_level}，自动加点: {display_name}")
 
 
 def visual_monitor_thread():
@@ -319,7 +339,8 @@ def visual_monitor_thread():
                 # ================= 区域坐标计算 =================
                 abs_x_w = client_point[0] + int(win_w * RATIO_W[0])
                 abs_y_w = client_point[1] + int(win_h * RATIO_W[1])
-                w_region = {'top': abs_y_w, 'left': abs_x_w, 'width': int(win_w * RATIO_W[2]), 'height': int(win_h * RATIO_W[3])}
+                w_region = {'top': abs_y_w, 'left': abs_x_w, 'width': int(win_w * RATIO_W[2]),
+                            'height': int(win_h * RATIO_W[3])}
 
                 shop_region = {
                     'top': client_point[1] + int(win_h * RATIO_SHOP[1]),
@@ -338,7 +359,7 @@ def visual_monitor_thread():
                         data = res.json()
                         api_success = True
                 except Exception as e:
-                    print(e)
+                    log(e)
                     pass
 
                 if api_success and data:
@@ -349,7 +370,7 @@ def visual_monitor_thread():
                     game_started = any(e.get('EventName') == 'GameStart' for e in events)
 
                     if game_ended and game_state['current_level'] > 0:
-                        print(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到 GameEnd 事件，游戏结束，点击屏幕中心退出！")
+                        log(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到 GameEnd 事件，游戏结束，点击屏幕中心退出！")
                         with mouse_lock:
                             human_move(game_state['center_x'], game_state['center_y'])
                             time.sleep(0.1)
@@ -365,9 +386,9 @@ def visual_monitor_thread():
                     # 提取自己当前的技能极速
                     champ_stats = active_player.get('championStats', {})
                     game_state['abilityHaste'] = champ_stats.get('abilityHaste', 0.0)
-                    if 0 < read_level <= 18 and game_started:
+                    if 0 < read_level <= 18 and game_started and not game_ended:
                         if game_state['current_level'] == 0:
-                            print(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
+                            log(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
                             # 开局直接标记为已购买
                             game_state['has_shopped_this_visit'] = True
                             game_state['last_shop_time'] = time.time()
@@ -381,19 +402,19 @@ def visual_monitor_thread():
                             # 防止异常黑屏导致除以0。如果你是在附身状态下重启脚本(亮度约131)，这里给个警告
                             if w_base_now < 10.0: w_base_now = base_w_normal
                             game_state['brightness_ratio'] = w_base_now / base_w_normal
-                            print(f"🔆 屏幕亮度校准完成！W技能基准: {float(w_base_now):.2f} ")
+                            log(f"🔆 屏幕亮度校准完成！W技能基准: {float(w_base_now):.2f} ")
 
                             # 1. 中心点聚焦点击
                             with mouse_lock:
                                 human_move(game_state['center_x'], game_state['center_y'])
                                 time.sleep(0.1)
                                 human_click('left')
-                            print("🖱️ 已点击屏幕中心聚焦游戏窗口")
+                            log("🖱️ 已点击屏幕中心聚焦游戏窗口")
                             time.sleep(0.5)
 
                             with mouse_lock:
                                 human_keypress('y')
-                            print("👁️ 已自动按下 Y 键锁定视角")
+                            log("👁️ 已自动按下 Y 键锁定视角")
                             time.sleep(0.5)
 
                             # 2. 分路选择点击 (拆分按下与松开)
@@ -403,12 +424,11 @@ def visual_monitor_thread():
                                 human_move(role_x, role_y)
                                 time.sleep(0.1)
                                 human_click('left')
-                            print("🎯 已自动点击分路任务 (辅助位置)")
+                            log("🎯 已自动点击分路任务 (辅助位置)")
 
                             game_state['current_level'] = read_level
                             level_up_skill(read_level)
                             game_state['start_time'] = time.time()
-
 
                             # 1. 获取当前玩家名字
                             active_name = active_player.get('riotIdGameName') or active_player.get(
@@ -425,12 +445,12 @@ def visual_monitor_thread():
                             if game_state.get('team_side'):
                                 side_cn = "蓝色方(基地在左下)" if game_state[
                                                                       'team_side'] == 'ORDER' else "红色方(基地在右上)"
-                                print(f"🚩 识别到玩家 [{active_name}]，当前阵营: {side_cn}")
+                                log(f"🚩 识别到玩家 [{active_name}]，当前阵营: {side_cn}")
                                 # 取出所有队友（排除自己）
                                 allies = [p for p in all_players if
                                           p.get('team') == game_state['team_side'] and (
-                                                      p.get('riotIdGameName') or p.get(
-                                                  'summonerName')) != active_name]
+                                                  p.get('riotIdGameName') or p.get(
+                                              'summonerName')) != active_name]
 
                                 target_idx = None
                                 target_reason = ""
@@ -476,7 +496,8 @@ def visual_monitor_thread():
                                 game_state['attached_teammate_index'] = target_idx
                                 game_state['attach_x'] = client_point[0] + teammate_x_list[target_idx]
                                 game_state['attach_y'] = client_point[1] + int(win_h * RATIO_ATTACH_Y)
-                                print(f"🎯 锁定跟随目标: [{target_name}] (UI 第 {target_idx + 1} 位) 锁定原因: {target_reason}")
+                                log(
+                                    f"🎯 锁定跟随目标: [{target_name}] (UI 第 {target_idx + 1} 位) 锁定原因: {target_reason}")
 
 
                         elif read_level > game_state['current_level']:
@@ -496,7 +517,7 @@ def visual_monitor_thread():
                             if is_in_base:
                                 if not game_state['has_shopped_this_visit'] and (
                                         time.time() - game_state.get('last_shop_time', 0.0) > 30.0):
-                                    print(f"\n[{time.strftime('%H:%M:%S')}] 🏠 检测到商城点亮(在泉水中)，执行自动购买！")
+                                    log(f"\n[{time.strftime('%H:%M:%S')}] 🏠 检测到商城点亮(在泉水中)，执行自动购买！")
                                     game_state['is_paused'] = True
                                     game_state['exclusive_mouse_until'] = time.time() + 4.0
                                     with mouse_lock:
@@ -507,7 +528,7 @@ def visual_monitor_thread():
                                         for i in range(2):
                                             human_click('right')
                                             time.sleep(0.5)
-                                    print("💰 装备购买完成")
+                                    log("💰 装备购买完成")
                                     time.sleep(0.2)
 
                                     with mouse_lock:
@@ -533,7 +554,7 @@ def visual_monitor_thread():
                                 if game_state.get('in_base_start_time', 0.0) == 0.0:
                                     game_state['in_base_start_time'] = current_time
                                 elif current_time - game_state['in_base_start_time'] > 40.0:
-                                    print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到当前队友在泉水挂机！执行自动换乘...")
+                                    log(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到当前队友在泉水挂机！执行自动换乘...")
                                     game_state['is_paused'] = True
                                     game_state['exclusive_mouse_until'] = time.time() + 2.0
                                     with mouse_lock:
@@ -548,7 +569,7 @@ def visual_monitor_thread():
                                     new_idx = (old_idx + 1) % len(teammate_x_list)
                                     game_state['attached_teammate_index'] = new_idx
                                     game_state['attach_x'] = int(client_point[0]) + int(teammate_x_list[new_idx])
-                                    print(f"🎯 已抛弃挂机玩家，目标自动切换为: 队友 {new_idx + 1}")
+                                    log(f"🎯 已抛弃挂机玩家，目标自动切换为: 队友 {new_idx + 1}")
 
                                     # 重置时间，强制下一秒立刻飞向新队友
                                     game_state['in_base_start_time'] = 0.0
@@ -562,13 +583,13 @@ def visual_monitor_thread():
 
                             if not is_attached:
                                 if not game_state['is_paused']:
-                                    print(f"[{time.strftime('%H:%M:%S')}] 📉 未附身/死亡，暂停其余动作循环！")
+                                    log(f"[{time.strftime('%H:%M:%S')}] 📉 未附身/死亡，暂停其余动作循环！")
                                     game_state['is_paused'] = True
 
                                     # 紧急判断：如果不在泉水，且距离上次手动按A超过3秒（排除玩家正常换人），说明是队友阵亡
                                     if not is_in_base and (
                                             current_time - game_state.get('last_manual_attach_time', 0.0) > 3.0):
-                                        print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到野外意外脱落，按下B键紧急回城！")
+                                        log(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到野外意外脱落，按下B键紧急回城！")
                                         with mouse_lock:
                                             human_keypress('b')
                                         game_state['last_recall_time'] = current_time
@@ -577,7 +598,7 @@ def visual_monitor_thread():
                                     # 如果刚刚按了回城，必须等 9 秒读条结束，期间不准执行任何附身动作
                                     if current_time - game_state.get('last_recall_time', 0.0) > 9.0:
                                         if current_time - game_state['last_auto_attach_time'] > 5.0:
-                                            print(
+                                            log(
                                                 f"[{time.strftime('%H:%M:%S')}] 🔗 尝试自动附身到队友 {game_state['attached_teammate_index'] + 1}...")
                                             game_state['exclusive_mouse_until'] = time.time() + 1.5
                                             game_state['is_simulating_attach'] = True
@@ -591,7 +612,7 @@ def visual_monitor_thread():
                                             game_state['last_auto_attach_time'] = current_time
                             else:
                                 if game_state['is_paused'] and not is_in_base:  # 确保在泉水买东西时不要马上重置暂停状态
-                                    print(f"[{time.strftime('%H:%M:%S')}] 📈 判定已成功附身，恢复动作循环！")
+                                    log(f"[{time.strftime('%H:%M:%S')}] 📈 判定已成功附身，恢复动作循环！")
                                     game_state['is_paused'] = False
                                     # 成功上车后，立即将鼠标移回屏幕中间，并点一下右键
                                     with mouse_lock:
@@ -643,20 +664,20 @@ def visual_monitor_thread():
                                     # 动态冷却计算。治疗等召唤师技能不受常规技能极速影响，R受到极速影响
                                     ah = game_state['abilityHaste']
                                     current_cd = base_cd if action_name == 'SUMMONER_HEAL' else base_cd * (
-                                                100.0 / (100.0 + ah))
+                                            100.0 / (100.0 + ah))
                                     if current_time - game_state['last_cast'][action_name] >= current_cd:
                                         physical_key = KEY_BINDINGS[action_name]
                                         display_name = DISPLAY_NAMES.get(action_name, action_name)
 
                                         with mouse_lock:
                                             human_keypress(physical_key)
-                                        print(
+                                        log(
                                             f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(当前真实冷却: {float(current_cd):.1f}s)")
 
                                         game_state['last_cast'][action_name] = current_time
                                         time.sleep(0.1)
             except Exception as e:
-                print(f"视觉线程异常: {e}")
+                log(f"视觉线程异常: {e}")
 
         time.sleep(1.0)
 
@@ -665,7 +686,7 @@ def action_worker(action_name, config, start_offset):
     session_started = False
     last_time = 0.0
     active_start_time = 0.0
-    was_paused = False
+
     action_name_str = str(action_name)
     physical_key = str(KEY_BINDINGS.get(action_name_str, action_name_str))
     condition = str(config.get('condition', 'none'))
@@ -688,7 +709,7 @@ def action_worker(action_name, config, start_offset):
             else:
                 base_cd = 100.0
 
-        # 特殊处理：召唤师技能和装备饰品不受常规英雄技能极速加成
+        # 召唤师技能和装备饰品不受常规英雄技能极速加成
         if action_name in ['SUMMONER_HEAL', 'SUMMONER_EXHAUST', 'WARD_AUX_EQUIP', 'WARD_ACCESSORY']:
             return base_cd
 
@@ -700,11 +721,6 @@ def action_worker(action_name, config, start_offset):
     while True:
         is_paused_now = game_state['is_paused']
 
-        # 冻结时间逻辑：刚刚从暂停恢复时，重置上一次释放时间，防止技能狂泻
-        if not is_paused_now and was_paused:
-            last_time = time.time()
-
-        was_paused = is_paused_now
         # 检查互斥锁，如果 Q 技能正在霸占鼠标，其他线程强制睡眠等待
         if time.time() < game_state.get('exclusive_mouse_until', 0.0):
             time.sleep(0.1)
@@ -720,7 +736,7 @@ def action_worker(action_name, config, start_offset):
                     active_start_time = current_time
                     next_interval = random.uniform(1.0, 3.0)
                     session_started = True
-                    print(f"[{time.strftime('%H:%M:%S')}] ⏳ {display_name} 达到启动时间！")
+                    log(f"[{time.strftime('%H:%M:%S')}] ⏳ {display_name} 达到启动时间！")
                 else:
                     time.sleep(0.5)
                     continue
@@ -769,7 +785,7 @@ def action_worker(action_name, config, start_offset):
                 msg = f"[{time.strftime('%H:%M:%S')}] 触发 {display_name} (距上次 {next_interval:.2f}s)"
                 if condition == 'low_health':
                     msg += " [⚠️队友残血触发]"
-                print(msg)
+                log(msg)
 
                 last_time = time.time()
                 if action_name in ['SUMMONER_HEAL', 'R']:
@@ -780,7 +796,7 @@ def action_worker(action_name, config, start_offset):
                 if base_mana_delay > 0:
                     # 随着游戏时间推移(TRANSITION_TIME)，额外延迟线性衰减到 0
                     current_mana_delay = max(0.0, base_mana_delay - (
-                                base_mana_delay / TRANSITION_TIME) * active_elapsed_time)
+                            base_mana_delay / TRANSITION_TIME) * active_elapsed_time)
                 else:
                     current_mana_delay = 0.0
 
@@ -834,7 +850,7 @@ def on_manual_attach(event):
         game_state['attached_teammate_index'] = closest_index
         game_state['last_auto_attach_time'] = time.time()
         game_state['last_manual_attach_time'] = time.time()
-        print(
+        log(
             f"\n[按键捕捉] 手动按下 {str(event.name).upper()} 键！已吸附队友 {closest_index + 1} 坐标: {closest_pos}\n")
 
 
@@ -868,9 +884,10 @@ def idle_mouse_worker():
         # 线程循环检测间隔
         time.sleep(random.uniform(1.0, 2.5))
 
+
 def main_controller():
-    print("🤖 悠米专属高级自动化脚本已启动...")
-    print("提示：按 [Ctrl + F12] 终止。\n")
+    log("🤖 悠米专属高级自动化脚本已启动...")
+    log("提示：按 [Ctrl + F12] 终止。\n")
 
     attach_key = KEY_BINDINGS.get('W', 'w')
     keyboard.on_press_key(attach_key, on_manual_attach)
@@ -898,7 +915,7 @@ def main_controller():
                 game_state['is_paused'] = False
                 game_state['window_moved'] = False
                 game_state['has_shopped_this_visit'] = False
-                print(f"\n[{time.strftime('%H:%M:%S')}] 🎮 游戏进程启动！等待进入游戏界面...")
+                log(f"\n[{time.strftime('%H:%M:%S')}] 🎮 游戏进程启动！等待进入游戏界面...")
                 time.sleep(1.0)
                 if move_window_to_top_right():
                     game_state['window_moved'] = True
@@ -911,7 +928,7 @@ def main_controller():
                 game_state['is_running'] = False
                 game_state['start_time'] = None
                 game_state['window_moved'] = False
-                print(f"\n[{time.strftime('%H:%M:%S')}] 🛑 游戏结束...")
+                log(f"\n[{time.strftime('%H:%M:%S')}] 🛑 游戏结束...")
 
                 # 寻找游戏大厅窗口，移动至右上角并双击底部
                 time.sleep(3.0)  # 给大厅一点弹出的缓冲时间
@@ -929,7 +946,7 @@ def main_controller():
                     win32gui.SetWindowPos(lobby_hwnd, win32con.HWND_TOP, new_x, new_y, win_w, win_h,
                                           win32con.SWP_SHOWWINDOW)
 
-                    print(f"🪟 已将游戏大厅移动至右上角: ({new_x}, {new_y})")
+                    log(f"🪟 已将游戏大厅移动至右上角: ({new_x}, {new_y})")
                     # 2. 点击底部三角标跳过结算等待动画
                     time.sleep(2.0)
                     skip_x = new_x + win_w // 2
@@ -938,7 +955,7 @@ def main_controller():
                         human_move(skip_x, skip_y)
                         time.sleep(0.5)
                         human_click('left')
-                    print("⏭️ 已点击跳过结算动画")
+                    log("⏭️ 已点击跳过结算动画")
 
                     # 3. 移动鼠标到大厅底部左侧位置并连续点击，触发 LeagueAkari 所需的重新匹配
                     time.sleep(3.0)
@@ -950,12 +967,12 @@ def main_controller():
                             time.sleep(2.5)
                             human_click('left')
 
-                    print("🖱️ 已点击大厅底部中央，准备衔接 LeagueAkari 自动匹配！")
+                    log("🖱️ 已点击大厅底部中央，准备衔接 LeagueAkari 自动匹配！")
 
             time.sleep(2.0)
 
     except KeyboardInterrupt:
-        print("\n⏹️ 接收到中断信号，脚本已安全停止。")
+        log("\n⏹️ 接收到中断信号，脚本已安全停止。")
 
 
 if __name__ == "__main__":
