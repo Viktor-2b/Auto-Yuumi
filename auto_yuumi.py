@@ -113,7 +113,9 @@ game_state: dict = {
     # 记录当前处于哪一方：'ORDER' (蓝方/左下) 或 'CHAOS' (红方/右上)
     'team_side': None,
     # 记录技能极速
-    'abilityHaste': 0.0
+    'abilityHaste': 0.0,
+    # 记录在泉水里附身停留的起始时间，用于防挂机
+    'in_base_start_time': 0.0
 }
 # 高频下路英雄清单 (包含常规ADC与法核)
 COMMON_BOT_CHAMPIONS = [
@@ -526,6 +528,34 @@ def visual_monitor_thread():
 
                             current_time = time.time()
                             is_attached = w_mean_brightness > (base_w_attach * game_state['brightness_ratio'])
+
+                            if is_in_base and is_attached:
+                                if game_state.get('in_base_start_time', 0.0) == 0.0:
+                                    game_state['in_base_start_time'] = current_time
+                                elif current_time - game_state['in_base_start_time'] > 40.0:
+                                    print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到当前队友在泉水挂机！执行自动换乘...")
+                                    game_state['is_paused'] = True
+                                    game_state['exclusive_mouse_until'] = time.time() + 2.0
+                                    with mouse_lock:
+                                        # 移动到屏幕中心按 W 下车
+                                        human_move(game_state['center_x'], game_state['center_y'], safe_zone=True)
+                                        time.sleep(0.1)
+                                        human_keypress(str(KEY_BINDINGS['W']))
+                                    time.sleep(0.5)
+
+                                    # 轮换到下一个队友 (0->1->2->3->0 循环)
+                                    old_idx = int(game_state['attached_teammate_index'])
+                                    new_idx = (old_idx + 1) % len(teammate_x_list)
+                                    game_state['attached_teammate_index'] = new_idx
+                                    game_state['attach_x'] = int(client_point[0]) + int(teammate_x_list[new_idx])
+                                    print(f"🎯 已抛弃挂机玩家，目标自动切换为: 队友 {new_idx + 1}")
+
+                                    # 重置时间，强制下一秒立刻飞向新队友
+                                    game_state['in_base_start_time'] = 0.0
+                                    game_state['last_auto_attach_time'] = 0.0
+                            else:
+                                # 只要出泉水，或者当前没附身，立刻清零挂机计时器
+                                game_state['in_base_start_time'] = 0.0
 
                             if current_time - last_print_time > 5.0:
                                 last_print_time = current_time
