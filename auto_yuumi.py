@@ -13,7 +13,6 @@ import win32con
 import cv2
 import numpy as np
 import mss
-import pytesseract
 import requests
 import urllib3
 
@@ -36,7 +35,6 @@ except (AttributeError, OSError):
 # 环境与全局配置
 # ==========================================
 os.makedirs("debug", exist_ok=True)
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 TARGET_PROCESS_NAME = "League of Legends.exe"
 WINDOW_NAME = "League of Legends (TM) Client"
@@ -125,7 +123,6 @@ COMMON_BOT_CHAMPIONS = [
     "岩雀", "光辉女郎", "爆破鬼才", "解脱者", "死亡颂唱者", "猩红收割者", "铸星龙王", "流光镜影"
 ]
 # 分辨率比例常量
-RATIO_LVL = (0.3027, 0.9687, 0.0127, 0.0169)       # 等级框 (X比例, Y比例, 宽比例, 高比例)
 RATIO_W = (0.4043, 0.8984, 0.0352, 0.0469)         # W技能框
 RATIO_SHOP = (0.5967, 0.9713, 0.0195, 0.0208)      # 商店框
 RATIO_ROLE = (0.6592, 0.8463)                      # 分路任务点击 (X, Y)
@@ -243,14 +240,13 @@ def human_keypress(key):
     time.sleep(hold_time)
     pydirectinput.keyUp(key)
 
-def is_game_running(process_name):
-    for proc in psutil.process_iter(['name']):
-        try:
-            if proc.info['name'] == process_name:
-                return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
-    return False
+def is_game_running():
+    try:
+        # 如果能获取到游戏基础数据且状态码200，说明已经进入召唤师峡谷
+        res = requests.get("https://127.0.0.1:2999/liveclientdata/gamestats", verify=False, timeout=1.0)
+        return res.status_code == 200
+    except (requests.exceptions.RequestException, ValueError):
+        return False
 
 
 def move_window_to_top_right():
@@ -307,9 +303,6 @@ def visual_monitor_thread():
 
     last_print_time = 0.0
 
-    # 队友血条的相对X坐标中心点列表
-    teammate_x_list = [840, 894, 945, 996]
-
     while True:
         if game_state['is_running'] and game_state['window_moved']:
             try:
@@ -322,10 +315,6 @@ def visual_monitor_thread():
                 win_w, win_h = client_rect[2], client_rect[3]
 
                 # ================= 区域坐标计算 =================
-                abs_x_lvl = client_point[0] + int(win_w * RATIO_LVL[0])
-                abs_y_lvl = client_point[1] + int(win_h * RATIO_LVL[1])
-                level_region = {'top': abs_y_lvl, 'left': abs_x_lvl, 'width': int(win_w * RATIO_LVL[2]), 'height': int(win_h * RATIO_LVL[3])}
-
                 abs_x_w = client_point[0] + int(win_w * RATIO_W[0])
                 abs_y_w = client_point[1] + int(win_h * RATIO_W[1])
                 w_region = {'top': abs_y_w, 'left': abs_x_w, 'width': int(win_w * RATIO_W[2]), 'height': int(win_h * RATIO_W[3])}
@@ -339,171 +328,148 @@ def visual_monitor_thread():
 
                 teammate_x_list = [int(win_w * rx) for rx in RATIO_TEAMMATE_X]
 
-                with mss.MSS() as sct:
-                    # ---- 等级处理 ----
-                    level_img = np.array(sct.grab(level_region))
-                    gray_lvl = cv2.cvtColor(level_img, cv2.COLOR_BGRA2GRAY)
-                    enlarged_lvl = cv2.resize(gray_lvl, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
+                api_success = False
+                data = None
+                try:
+                    res = requests.get("https://127.0.0.1:2999/liveclientdata/allgamedata", verify=False, timeout=1.0)
+                    if res.status_code == 200:
+                        data = res.json()
+                        api_success = True
+                except Exception as e:
+                    print(e)
+                    pass
 
-                    # 圆环掩码：创a建一个纯黑背景，中间画一个白圆，只保留圆形区域内的图像，抹除四个角的边框残影
-                    mask = np.zeros(enlarged_lvl.shape, dtype=np.uint8)
-                    center_x, center_y = enlarged_lvl.shape[1] // 2, enlarged_lvl.shape[0] // 2
-                    # 半径，原图13*5=65，中心点32
-                    cv2.circle(mask, (center_x, center_y), 33, 255, -1)
-                    masked_lvl = cv2.bitwise_and(enlarged_lvl, enlarged_lvl, mask=mask)
+                if api_success and data:
+                    # 检查是否出现游戏结束事件 (GameEnd)
+                    events = data.get('events', {}).get('Events', [])
+                    game_ended = any(e.get('EventName') == 'GameEnd' for e in events)
 
-                    final_lvl = cv2.bitwise_not(masked_lvl)
-
-                    _, binary_lvl = cv2.threshold(final_lvl, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-                    # 将最终送给 OCR 识别的图像保存到本地，方便排查错认问题
-                    cv2.imwrite(os.path.join('debug', 'ocr_level.png'), binary_lvl)
-
-                    # 如果等级框全白（二值化反转后全白，说明原图UI消失了），说明游戏退出了结算
-                    if game_state['current_level'] > 0 and np.mean(final_lvl) >= 250.0:
-                        print(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到等级框全白，游戏结束，点击屏幕中心退出！")
+                    if game_ended and game_state['current_level'] > 0:
+                        print(f"[{time.strftime('%H:%M:%S')}] 🛑 识别到 GameEnd 事件，游戏结束，点击屏幕中心退出！")
                         with mouse_lock:
                             human_move(game_state['center_x'], game_state['center_y'])
                             time.sleep(0.1)
                             human_click('left')
-                        time.sleep(1.5)  # 休眠一会，避免疯狂连点
+                        time.sleep(1.5)
                         game_state['current_level'] = 0
                         game_state['is_paused'] = True
                         continue
 
-                    custom_config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789'
-                    level_text = pytesseract.image_to_string(final_lvl, config=custom_config).strip()
+                    # 提取自己当前的等级
+                    active_player = data.get('activePlayer', {})
+                    read_level = active_player.get('level', 0)
+                    if 0 < read_level <= 18:
+                        if game_state['current_level'] == 0:
+                            print(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
+                            # 开局直接标记为已购买
+                            game_state['has_shopped_this_visit'] = True
+                            game_state['last_shop_time'] = time.time()
 
-                    if level_text.isdigit():
-                        read_level = int(level_text)
-                        if 0 < read_level <= 18:
-                            if game_state['current_level'] == 0:
-                                print(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
-                                # 开局直接标记为已购买
-                                game_state['has_shopped_this_visit'] = True
-                                game_state['last_shop_time'] = time.time()
-
-                                time.sleep(5.0)
-                                # ================= 动态亮度校准 =================
+                            time.sleep(5.0)
+                            # ================= 动态亮度校准 =================
+                            with mss.MSS() as sct:
                                 w_img_calib = np.array(sct.grab(w_region))
                                 w_base_now = np.mean(cv2.cvtColor(w_img_calib, cv2.COLOR_BGRA2GRAY))
 
-                                # 防止异常黑屏导致除以0。如果你是在附身状态下重启脚本(亮度约131)，这里给个警告
-                                if w_base_now < 10.0: w_base_now = base_w_normal
-                                game_state['brightness_ratio'] = w_base_now / base_w_normal
+                            # 防止异常黑屏导致除以0。如果你是在附身状态下重启脚本(亮度约131)，这里给个警告
+                            if w_base_now < 10.0: w_base_now = base_w_normal
+                            game_state['brightness_ratio'] = w_base_now / base_w_normal
+                            print(f"🔆 屏幕亮度校准完成！W技能基准: {w_base_now:.2f} ")
 
-                                print(
-                                    f"🔆 屏幕亮度校准完成！W技能基准: {w_base_now:.2f} (适应比例: {game_state['brightness_ratio']:.2f})")
-                                if w_base_now > 180.0:
-                                    print(
-                                        "⚠️ [警告] 初始亮度偏高，若您是在附身状态下启动的脚本，校准可能会产生偏差！建议下车后重启脚本。")
+                            # 1. 中心点聚焦点击
+                            with mouse_lock:
+                                human_move(game_state['center_x'], game_state['center_y'])
+                                time.sleep(0.1)
+                                human_click('left')
+                            print("🖱️ 已点击屏幕中心聚焦游戏窗口")
+                            time.sleep(0.5)
 
-                                # 1. 中心点聚焦点击 (拆分按下与松开)
-                                with mouse_lock:
-                                    human_move(game_state['center_x'], game_state['center_y'])
-                                    time.sleep(0.1)
-                                    human_click('left')
-                                print("🖱️ 已点击屏幕中心聚焦游戏窗口")
-                                time.sleep(0.5)
+                            with mouse_lock:
+                                human_keypress('y')
+                            print("👁️ 已自动按下 Y 键锁定视角")
+                            time.sleep(0.5)
 
-                                with mouse_lock:
-                                    human_keypress('y')
-                                print("👁️ 已自动按下 Y 键锁定视角")
-                                time.sleep(0.5)
+                            # 2. 分路选择点击 (拆分按下与松开)
+                            role_x = client_point[0] + int(win_w * RATIO_ROLE[0])
+                            role_y = client_point[1] + int(win_h * RATIO_ROLE[1])
+                            with mouse_lock:
+                                human_move(role_x, role_y)
+                                time.sleep(0.1)
+                                human_click('left')
+                            print("🎯 已自动点击分路任务 (辅助位置)")
 
-                                # 2. 分路选择点击 (拆分按下与松开)
-                                role_x = client_point[0] + 675
-                                role_y = client_point[1] + 650
-                                with mouse_lock:
-                                    human_move(role_x, role_y)
-                                    time.sleep(0.1)
-                                    human_click('left')
-                                print("🎯 已自动点击分路任务 (辅助位置)")
+                            game_state['current_level'] = read_level
+                            level_up_skill(read_level)
+                            game_state['start_time'] = time.time()
 
-                                game_state['current_level'] = read_level
-                                level_up_skill(read_level)
-                                # 在真正进入游戏地图时，将时间锚点重置。
-                                game_state['start_time'] = time.time()
-                                try:
-                                    # 直接请求 allgamedata，一份数据包含所有所需信息
-                                    res = requests.get("https://127.0.0.1:2999/liveclientdata/allgamedata",
-                                                       verify=False, timeout=2)
-                                    if res.status_code == 200:
-                                        data = res.json()
 
-                                        # 1. 获取当前玩家名字（完美兼容 Riot ID 时代的新老键值）
-                                        active_player = data.get('activePlayer', {})
-                                        active_name = active_player.get('riotIdGameName') or active_player.get(
-                                            'summonerName')
+                            # 1. 获取当前玩家名字
+                            active_name = active_player.get('riotIdGameName') or active_player.get(
+                                'summonerName')
 
-                                        # 2. 去 10 人大名单里找到自己，提取 team 字段
-                                        all_players = data.get('allPlayers', [])
-                                        for player in all_players:
-                                            p_name = player.get('riotIdGameName') or player.get('summonerName')
-                                            if p_name == active_name:
-                                                game_state['team_side'] = player.get('team')
-                                                break
+                            # 2. 去 10 人大名单里找到自己，提取 team 字段
+                            all_players = data.get('allPlayers', [])
+                            for player in all_players:
+                                p_name = player.get('riotIdGameName') or player.get('summonerName')
+                                if p_name == active_name:
+                                    game_state['team_side'] = player.get('team')
+                                    break
 
-                                        if game_state.get('team_side'):
-                                            side_cn = "蓝色方(基地在左下)" if game_state[
-                                                                                  'team_side'] == 'ORDER' else "红色方(基地在右上)"
-                                            print(f"🚩 局内 API 连通！识别到玩家 [{active_name}]，当前阵营: {side_cn}")
-                                            # 取出所有队友（排除自己）
-                                            allies = [p for p in all_players if
-                                                      p.get('team') == game_state['team_side'] and (
-                                                                  p.get('riotIdGameName') or p.get(
-                                                              'summonerName')) != active_name]
+                            if game_state.get('team_side'):
+                                side_cn = "蓝色方(基地在左下)" if game_state[
+                                                                      'team_side'] == 'ORDER' else "红色方(基地在右上)"
+                                print(f"🚩 识别到玩家 [{active_name}]，当前阵营: {side_cn}")
+                                # 取出所有队友（排除自己）
+                                allies = [p for p in all_players if
+                                          p.get('team') == game_state['team_side'] and (
+                                                      p.get('riotIdGameName') or p.get(
+                                                  'summonerName')) != active_name]
 
-                                            target_idx = None
-                                            target_reason = ""
+                                target_idx = None
+                                target_reason = ""
 
-                                            # 优先级 1: 官方分路标签为 BOTTOM (适用于排位/征召)
-                                            for i, ally in enumerate(allies):
-                                                if ally.get('position') == 'BOTTOM':
-                                                    target_idx = i
-                                                    target_reason = "官方分路标签 [BOTTOM]"
-                                                    break
+                                # 优先级 1: 官方分路标签为 BOTTOM (适用于排位/征召)
+                                for i, ally in enumerate(allies):
+                                    if ally.get('position') == 'BOTTOM':
+                                        target_idx = i
+                                        target_reason = "官方分路标签 [BOTTOM]"
+                                        break
 
-                                            # 优先级 2: 常用下路英雄名单匹配 (适用于匹配/人机)
-                                            if target_idx is None:
-                                                best_rank = float('inf')  # 初始排名设为无限大
-                                                for i, ally in enumerate(allies):
-                                                    champ_name = ally.get('championName')
-                                                    if champ_name in COMMON_BOT_CHAMPIONS:
-                                                        # 获取该英雄在名单里的索引号（越小排名越高）
-                                                        rank = COMMON_BOT_CHAMPIONS.index(champ_name)
-                                                        # 如果当前英雄的排名比之前找到的还要高，就替换目标
-                                                        if rank < best_rank:
-                                                            best_rank = rank
-                                                            target_idx = i
-                                                            target_reason = f"高频下路英雄 [{champ_name}] (优先级 {rank + 1})"
+                                # 优先级 2: 常用下路英雄名单匹配 (适用于匹配/人机)
+                                if target_idx is None:
+                                    best_rank = float('inf')  # 初始排名设为无限大
+                                    for i, ally in enumerate(allies):
+                                        champ_name = ally.get('championName')
+                                        if champ_name in COMMON_BOT_CHAMPIONS:
+                                            # 获取该英雄在名单里的索引号（越小排名越高）
+                                            rank = COMMON_BOT_CHAMPIONS.index(champ_name)
+                                            # 如果当前英雄的排名比之前找到的还要高，就替换目标
+                                            if rank < best_rank:
+                                                best_rank = rank
+                                                target_idx = i
+                                                target_reason = f"高频下路英雄 [{champ_name}] (优先级 {rank + 1})"
 
-                                            # 优先级 3: 寻找带惩戒的打野 (超级兜底)
-                                            if target_idx is None:
-                                                for i, ally in enumerate(allies):
-                                                    spells = ally.get('summonerSpells', {})
-                                                    s1 = spells.get('summonerSpellOne', {}).get('displayName', '')
-                                                    s2 = spells.get('summonerSpellTwo', {}).get('displayName', '')
-                                                    if '惩戒' in s1 or '惩戒' in s2:
-                                                        target_idx = i
-                                                        target_reason = f"召唤师技能 [惩戒打野 - {ally.get('championName')}]"
-                                                        break
+                                # 优先级 3: 寻找带惩戒的打野 (超级兜底)
+                                if target_idx is None:
+                                    for i, ally in enumerate(allies):
+                                        spells = ally.get('summonerSpells', {})
+                                        s1 = spells.get('summonerSpellOne', {}).get('displayName', '')
+                                        s2 = spells.get('summonerSpellTwo', {}).get('displayName', '')
+                                        if '惩戒' in s1 or '惩戒' in s2:
+                                            target_idx = i
+                                            target_reason = f"召唤师技能 [惩戒打野 - {ally.get('championName')}]"
+                                            break
 
-                                            # 优先级 4: 无特征，维持开局时的第 4 位盲猜
-                                            if target_idx is None:
-                                                target_idx = 3
-                                                target_reason = "保底匹配"
-                                            target_name = allies[target_idx].get('riotIdGameName') or allies[
-                                                target_idx].get('summonerName')
-                                            game_state['attached_teammate_index'] = target_idx
-                                            game_state['attach_x'] = client_point[0] + teammate_x_list[target_idx]
-                                            game_state['attach_y'] = client_point[1] + int(win_h * RATIO_ATTACH_Y)
-                                            print(f"🎯 锁定跟随目标: [{target_name}] (UI 第 {target_idx + 1} 位) 锁定原因: {target_reason}")
-
-                                        else:
-                                            print(f"⚠️ API 通信正常，但在名单中未找到匹配的阵营信息！")
-                                except Exception as e:
-                                    print(f"⚠️ 无法获取阵营信息，Q技能将使用全向随机盲打。错误: {e}")
+                                # 优先级 4: 无特征，维持开局时的第 4 位盲猜
+                                if target_idx is None:
+                                    target_idx = 3
+                                    target_reason = "保底匹配"
+                                target_name = allies[target_idx].get('riotIdGameName') or allies[
+                                    target_idx].get('summonerName')
+                                game_state['attached_teammate_index'] = target_idx
+                                game_state['attach_x'] = client_point[0] + teammate_x_list[target_idx]
+                                game_state['attach_y'] = client_point[1] + int(win_h * RATIO_ATTACH_Y)
+                                print(f"🎯 锁定跟随目标: [{target_name}] (UI 第 {target_idx + 1} 位) 锁定原因: {target_reason}")
 
 
                             elif read_level > game_state['current_level']:
@@ -511,146 +477,145 @@ def visual_monitor_thread():
                                 level_up_skill(read_level)
 
                     if game_state['current_level'] > 0 and game_state['start_time'] is not None:
-                        # ================= 商城回城状态处理 =================
-                        shop_img = np.array(sct.grab(shop_region))
-                        shop_gray = cv2.cvtColor(shop_img, cv2.COLOR_BGRA2GRAY)
-                        cv2.imwrite(os.path.join('debug', 'ocr_shop.png'), shop_gray)
-                        shop_mean = np.mean(shop_gray)
+                        with mss.MSS() as sct:
+                            # ================= 商城回城状态处理 =================
+                            shop_img = np.array(sct.grab(shop_region))
+                            shop_gray = cv2.cvtColor(shop_img, cv2.COLOR_BGRA2GRAY)
+                            cv2.imwrite(os.path.join('debug', 'ocr_shop.png'), shop_gray)
+                            shop_mean = np.mean(shop_gray)
 
-                        is_in_base = shop_mean > (base_shop_bright * game_state['brightness_ratio'])
+                            is_in_base = shop_mean > (base_shop_bright * game_state['brightness_ratio'])
 
-                        if is_in_base:
-                            if not game_state['has_shopped_this_visit'] and (
-                                    time.time() - game_state.get('last_shop_time', 0.0) > 30.0):
-                                print(f"\n[{time.strftime('%H:%M:%S')}] 🏠 检测到商城点亮(在泉水中)，执行自动购买！")
-                                game_state['is_paused'] = True
-                                game_state['exclusive_mouse_until'] = time.time() + 4.0
-                                with mouse_lock:
-                                    human_keypress('p')
-                                    time.sleep(0.5)
-                                    human_move(game_state['center_x'], game_state['center_y'])
-                                    time.sleep(0.1)
-                                    for i in range(2):
-                                        human_click('right')
+                            if is_in_base:
+                                if not game_state['has_shopped_this_visit'] and (
+                                        time.time() - game_state.get('last_shop_time', 0.0) > 30.0):
+                                    print(f"\n[{time.strftime('%H:%M:%S')}] 🏠 检测到商城点亮(在泉水中)，执行自动购买！")
+                                    game_state['is_paused'] = True
+                                    game_state['exclusive_mouse_until'] = time.time() + 4.0
+                                    with mouse_lock:
+                                        human_keypress('p')
                                         time.sleep(0.5)
-                                print("💰 装备购买完成")
-                                time.sleep(0.2)
-
-                                with mouse_lock:
-                                    human_keypress('p')
-                                time.sleep(0.5)
-
-                                game_state['has_shopped_this_visit'] = True
-                                game_state['last_shop_time'] = time.time()
-                        else:
-                            if time.time() - game_state.get('last_shop_time', 0.0) > 30.0:
-                                game_state['has_shopped_this_visit'] = False
-
-                        # ---- W 技能图标状态处理 ----
-                        w_img = np.array(sct.grab(w_region))
-                        w_gray = cv2.cvtColor(w_img, cv2.COLOR_BGRA2GRAY)
-                        cv2.imwrite(os.path.join('debug', 'ocr_w.png'), w_gray)
-                        w_mean_brightness = np.mean(w_gray)
-
-                        current_time = time.time()
-                        is_attached = w_mean_brightness > (base_w_attach * game_state['brightness_ratio'])
-
-                        if current_time - last_print_time > 5.0:
-                            last_print_time = current_time
-
-                        if not is_attached:
-                            if not game_state['is_paused']:
-                                print(f"[{time.strftime('%H:%M:%S')}] 📉 未附身/死亡，暂停其余动作循环！")
-                                game_state['is_paused'] = True
-
-                                # 紧急判断：如果不在泉水，且距离上次手动按A超过3秒（排除玩家正常换人），说明是队友阵亡
-                                if not is_in_base and (
-                                        current_time - game_state.get('last_manual_attach_time', 0.0) > 3.0):
-                                    print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到野外意外脱落，按下B键紧急回城！")
-                                    with mouse_lock:
-                                        human_keypress('b')
-                                    game_state['last_recall_time'] = current_time
-
-                            if game_state['attach_x'] and game_state['attach_y']:
-                                # 如果刚刚按了回城，必须等 9 秒读条结束，期间不准执行任何附身动作
-                                if current_time - game_state.get('last_recall_time', 0.0) > 9.0:
-                                    if current_time - game_state['last_auto_attach_time'] > 5.0:
-                                        print(
-                                            f"[{time.strftime('%H:%M:%S')}] 🔗 尝试自动附身到队友 {game_state['attached_teammate_index'] + 1}...")
-                                        game_state['exclusive_mouse_until'] = time.time() + 1.5
-                                        game_state['is_simulating_attach'] = True
-                                        with mouse_lock:
-                                            human_move(game_state['attach_x'], game_state['attach_y'])
-                                            time.sleep(0.1)
-                                            human_keypress(KEY_BINDINGS['W'])
+                                        human_move(game_state['center_x'], game_state['center_y'])
                                         time.sleep(0.1)
-                                        game_state['is_simulating_attach'] = False
-
-                                        game_state['last_auto_attach_time'] = current_time
-                        else:
-                            if game_state['is_paused'] and not is_in_base:  # 确保在泉水买东西时不要马上重置暂停状态
-                                print(f"[{time.strftime('%H:%M:%S')}] 📈 判定已成功附身，恢复动作循环！")
-                                game_state['is_paused'] = False
-                                # 成功上车后，立即将鼠标移回屏幕中间，并点一下右键
-                                with mouse_lock:
-                                    human_move(game_state['center_x'], game_state['center_y'])
-                                    time.sleep(0.05)
-                                    human_click('right')
-                        # ---- 血条状态处理 (动态追踪) ----
-                        # 读取当前记录的队友索引，计算他专属的血条坐标
-                        current_teammate_idx = game_state['attached_teammate_index']
-                        # 计算随时间递减的X轴偏移量 (从 10 递减到 0)
-                        t_elapsed = time.time() - game_state['start_time']
-                        ratio = min(1.0, t_elapsed / TRANSITION_TIME)
-                        shift_x = int(10 - 20 * ratio)
-
-                        # 原始X中心加上偏移量，提前探测掉血
-                        hp_center_x = client_point[0] + teammate_x_list[current_teammate_idx] + shift_x
-                        hp_w = int(win_w * RATIO_HP_Y_W_H[1])
-                        health_region = {
-                            'top': client_point[1] + int(win_h * RATIO_HP_Y_W_H[0]),
-                            'left': hp_center_x - (hp_w // 2),
-                            'width': hp_w,
-                            'height': int(win_h * RATIO_HP_Y_W_H[2])
-                        }
-
-                        hp_img = np.array(sct.grab(health_region))
-                        hp_gray = cv2.cvtColor(hp_img, cv2.COLOR_BGRA2GRAY)
-                        cv2.imwrite(os.path.join('debug', 'ocr_hp.png'), hp_gray)
-                        hp_mean = np.mean(hp_gray)
-
-                        # 只有当这个区域变成暗黑，才判定为残血（掉血超过一半经过了中心点）
-                        game_state['teammate_low_health'] = hp_mean < (
-                                base_health_black * game_state['brightness_ratio'])
-
-                        # ================= 紧急技能释放 =================
-                        # 如果没有被暂停，且队友残血，立即进行CD判定并释放
-                        if game_state['teammate_low_health'] and not game_state['is_paused'] and not is_in_base:
-                            current_time = time.time()
-                            elapsed = current_time - game_state['start_time']
-
-                            # 遍历所有被定性为“紧急救援”的逻辑动作
-                            for action_name in ['SUMMONER_HEAL', 'R']:
-                                config = ACTION_CONFIG[action_name]
-                                start_cd = config['start']
-                                end_cd = config['end']
-
-                                # 动态冷却计算 (根据全局配置的起止时间计算)
-                                current_cd = max(end_cd, start_cd - ((start_cd - end_cd) / TRANSITION_TIME) * elapsed)
-
-                                if current_time - game_state['last_cast'][action_name] >= current_cd:
-                                    physical_key = KEY_BINDINGS[action_name]
-                                    display_name = DISPLAY_NAMES.get(action_name, action_name)
+                                        for i in range(2):
+                                            human_click('right')
+                                            time.sleep(0.5)
+                                    print("💰 装备购买完成")
+                                    time.sleep(0.2)
 
                                     with mouse_lock:
-                                        human_keypress(physical_key)
-                                    print(
-                                        f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(冷却: {current_cd:.1f}s)")
+                                        human_keypress('p')
+                                    time.sleep(0.5)
 
-                                    game_state['last_cast'][action_name] = current_time
-                                    time.sleep(0.1)
+                                    game_state['has_shopped_this_visit'] = True
+                                    game_state['last_shop_time'] = time.time()
+                            else:
+                                if time.time() - game_state.get('last_shop_time', 0.0) > 30.0:
+                                    game_state['has_shopped_this_visit'] = False
 
+                            # ---- W 技能图标状态处理 ----
+                            w_img = np.array(sct.grab(w_region))
+                            w_gray = cv2.cvtColor(w_img, cv2.COLOR_BGRA2GRAY)
+                            cv2.imwrite(os.path.join('debug', 'ocr_w.png'), w_gray)
+                            w_mean_brightness = np.mean(w_gray)
 
+                            current_time = time.time()
+                            is_attached = w_mean_brightness > (base_w_attach * game_state['brightness_ratio'])
+
+                            if current_time - last_print_time > 5.0:
+                                last_print_time = current_time
+
+                            if not is_attached:
+                                if not game_state['is_paused']:
+                                    print(f"[{time.strftime('%H:%M:%S')}] 📉 未附身/死亡，暂停其余动作循环！")
+                                    game_state['is_paused'] = True
+
+                                    # 紧急判断：如果不在泉水，且距离上次手动按A超过3秒（排除玩家正常换人），说明是队友阵亡
+                                    if not is_in_base and (
+                                            current_time - game_state.get('last_manual_attach_time', 0.0) > 3.0):
+                                        print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 检测到野外意外脱落，按下B键紧急回城！")
+                                        with mouse_lock:
+                                            human_keypress('b')
+                                        game_state['last_recall_time'] = current_time
+
+                                if game_state['attach_x'] and game_state['attach_y']:
+                                    # 如果刚刚按了回城，必须等 9 秒读条结束，期间不准执行任何附身动作
+                                    if current_time - game_state.get('last_recall_time', 0.0) > 9.0:
+                                        if current_time - game_state['last_auto_attach_time'] > 5.0:
+                                            print(
+                                                f"[{time.strftime('%H:%M:%S')}] 🔗 尝试自动附身到队友 {game_state['attached_teammate_index'] + 1}...")
+                                            game_state['exclusive_mouse_until'] = time.time() + 1.5
+                                            game_state['is_simulating_attach'] = True
+                                            with mouse_lock:
+                                                human_move(game_state['attach_x'], game_state['attach_y'])
+                                                time.sleep(0.1)
+                                                human_keypress(KEY_BINDINGS['W'])
+                                            time.sleep(0.1)
+                                            game_state['is_simulating_attach'] = False
+
+                                            game_state['last_auto_attach_time'] = current_time
+                            else:
+                                if game_state['is_paused'] and not is_in_base:  # 确保在泉水买东西时不要马上重置暂停状态
+                                    print(f"[{time.strftime('%H:%M:%S')}] 📈 判定已成功附身，恢复动作循环！")
+                                    game_state['is_paused'] = False
+                                    # 成功上车后，立即将鼠标移回屏幕中间，并点一下右键
+                                    with mouse_lock:
+                                        human_move(game_state['center_x'], game_state['center_y'])
+                                        time.sleep(0.05)
+                                        human_click('right')
+                            # ---- 血条状态处理 (动态追踪) ----
+                            # 读取当前记录的队友索引，计算他专属的血条坐标
+                            current_teammate_idx = game_state['attached_teammate_index']
+                            # 计算随时间递减的X轴偏移量 (从 10 递减到 0)
+                            t_elapsed = time.time() - game_state['start_time']
+                            ratio = min(1.0, t_elapsed / TRANSITION_TIME)
+                            shift_x = int(10 - 20 * ratio)
+
+                            # 原始X中心加上偏移量，提前探测掉血
+                            hp_center_x = client_point[0] + teammate_x_list[current_teammate_idx] + shift_x
+                            hp_w = int(win_w * RATIO_HP_Y_W_H[1])
+                            health_region = {
+                                'top': client_point[1] + int(win_h * RATIO_HP_Y_W_H[0]),
+                                'left': hp_center_x - (hp_w // 2),
+                                'width': hp_w,
+                                'height': int(win_h * RATIO_HP_Y_W_H[2])
+                            }
+
+                            hp_img = np.array(sct.grab(health_region))
+                            hp_gray = cv2.cvtColor(hp_img, cv2.COLOR_BGRA2GRAY)
+                            cv2.imwrite(os.path.join('debug', 'ocr_hp.png'), hp_gray)
+                            hp_mean = np.mean(hp_gray)
+
+                            # 只有当这个区域变成暗黑，才判定为残血（掉血超过一半经过了中心点）
+                            game_state['teammate_low_health'] = hp_mean < (
+                                    base_health_black * game_state['brightness_ratio'])
+
+                            # ================= 紧急技能释放 =================
+                            # 如果没有被暂停，且队友残血，立即进行CD判定并释放
+                            if game_state['teammate_low_health'] and not game_state['is_paused'] and not is_in_base:
+                                current_time = time.time()
+                                elapsed = current_time - game_state['start_time']
+
+                                # 遍历所有被定性为“紧急救援”的逻辑动作
+                                for action_name in ['SUMMONER_HEAL', 'R']:
+                                    config = ACTION_CONFIG[action_name]
+                                    start_cd = config['start']
+                                    end_cd = config['end']
+
+                                    # 动态冷却计算 (根据全局配置的起止时间计算)
+                                    current_cd = max(end_cd, start_cd - ((start_cd - end_cd) / TRANSITION_TIME) * elapsed)
+
+                                    if current_time - game_state['last_cast'][action_name] >= current_cd:
+                                        physical_key = KEY_BINDINGS[action_name]
+                                        display_name = DISPLAY_NAMES.get(action_name, action_name)
+
+                                        with mouse_lock:
+                                            human_keypress(physical_key)
+                                        print(
+                                            f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(冷却: {current_cd:.1f}s)")
+
+                                        game_state['last_cast'][action_name] = current_time
+                                        time.sleep(0.1)
             except Exception as e:
                 print(f"视觉线程异常: {e}")
 
@@ -688,7 +653,7 @@ def action_worker(action_name, config, start_offset):
                 if global_elapsed_time >= (config['delay'] + start_offset):
                     last_time = current_time
                     active_start_time = current_time
-                    next_interval = random.uniform(config['start'] - 0.5, config['start'] + 0.5)
+                    next_interval = random.uniform(1.0, 3.0)
                     session_started = True
                     print(f"[{time.strftime('%H:%M:%S')}] ⏳ {display_name} 达到启动时间！")
                 else:
@@ -844,7 +809,7 @@ def main_controller():
 
     try:
         while True:
-            running = is_game_running(TARGET_PROCESS_NAME)
+            running = is_game_running()
 
             if running and not game_state['is_running']:
                 game_state['is_running'] = True
