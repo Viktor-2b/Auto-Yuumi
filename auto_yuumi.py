@@ -173,11 +173,10 @@ def human_move(dest_x, dest_y, duration_min=0.01, duration_max=0.04, safe_zone=F
             cy = r2_top - 5
         return cx, cy
 
-    distance = math.hypot(dest_x - start_x, dest_y - start_y)
 
     # 目标点加入正态分布的微小偏差
-    dest_x += int(random.gauss(0, 3))
-    dest_y += int(random.gauss(0, 3))
+    dest_x = int(dest_x + random.gauss(0, 3))
+    dest_y = int(dest_y + random.gauss(0, 3))
     dest_x, dest_y = enforce_safe_zone(dest_x, dest_y)
 
     distance = math.hypot(dest_x - start_x, dest_y - start_y)
@@ -278,8 +277,8 @@ def move_window_to_top_right():
 def level_up_skill(target_level):
     if target_level > len(SKILL_UPGRADE_ORDER):
         return
-    logical_action = SKILL_UPGRADE_ORDER[target_level - 1]
-    physical_key = KEY_BINDINGS.get(logical_action, logical_action)  # 查字典获取真实按键
+    logical_action = str(SKILL_UPGRADE_ORDER[int(target_level) - 1])
+    physical_key = KEY_BINDINGS.get(logical_action, logical_action)
     display_name = DISPLAY_NAMES.get(logical_action, logical_action)
 
     # 上锁，防止被其他技能消耗
@@ -330,7 +329,7 @@ def visual_monitor_thread():
                 teammate_x_list = [int(win_w * rx) for rx in RATIO_TEAMMATE_X]
 
                 api_success = False
-                data = None
+                data = {}
                 try:
                     res = requests.get("https://127.0.0.1:2999/liveclientdata/allgamedata", verify=False, timeout=1.0)
                     if res.status_code == 200:
@@ -342,7 +341,8 @@ def visual_monitor_thread():
 
                 if api_success and data:
                     # 检查是否出现游戏结束事件 (GameEnd)
-                    events = data.get('events', {}).get('Events', [])
+                    events_data = data.get('events') or {}
+                    events = events_data.get('Events') or []
                     game_ended = any(e.get('EventName') == 'GameEnd' for e in events)
                     game_started = any(e.get('EventName') == 'GameStart' for e in events)
 
@@ -379,7 +379,7 @@ def visual_monitor_thread():
                             # 防止异常黑屏导致除以0。如果你是在附身状态下重启脚本(亮度约131)，这里给个警告
                             if w_base_now < 10.0: w_base_now = base_w_normal
                             game_state['brightness_ratio'] = w_base_now / base_w_normal
-                            print(f"🔆 屏幕亮度校准完成！W技能基准: {w_base_now:.2f} ")
+                            print(f"🔆 屏幕亮度校准完成！W技能基准: {float(w_base_now):.2f} ")
 
                             # 1. 中心点聚焦点击
                             with mouse_lock:
@@ -577,7 +577,7 @@ def visual_monitor_thread():
                             shift_x = int(10 - 20 * ratio)
 
                             # 原始X中心加上偏移量，提前探测掉血
-                            hp_center_x = client_point[0] + teammate_x_list[current_teammate_idx] + shift_x
+                            hp_center_x = int(client_point[0]) + teammate_x_list[current_teammate_idx] + shift_x
                             hp_w = int(win_w * RATIO_HP_Y_W_H[1])
                             health_region = {
                                 'top': client_point[1] + int(win_h * RATIO_HP_Y_W_H[0]),
@@ -621,7 +621,7 @@ def visual_monitor_thread():
                                         with mouse_lock:
                                             human_keypress(physical_key)
                                         print(
-                                            f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(当前真实冷却: {current_cd:.1f}s)")
+                                            f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(当前真实冷却: {float(current_cd):.1f}s)")
 
                                         game_state['last_cast'][action_name] = current_time
                                         time.sleep(0.1)
@@ -636,9 +636,11 @@ def action_worker(action_name, config, start_offset):
     last_time = 0.0
     active_start_time = 0.0
     was_paused = False
-    physical_key = KEY_BINDINGS.get(action_name, action_name)
-    condition = config.get('condition', 'none')
-    display_name = f"[{DISPLAY_NAMES.get(action_name, action_name)}] ({str(physical_key).upper()})"
+    action_name_str = str(action_name)
+    physical_key = str(KEY_BINDINGS.get(action_name_str, action_name_str))
+    condition = str(config.get('condition', 'none'))
+    logical_name = str(DISPLAY_NAMES.get(action_name_str, action_name_str))
+    display_name = f"[{logical_name}] ({physical_key.upper()})"
 
     def get_actual_cd():
         base_cd = config['base_cd']
@@ -838,10 +840,11 @@ def idle_mouse_worker():
 
 def main_controller():
     print("🤖 悠米专属高级自动化脚本已启动...")
-    print("提示：按 [Ctrl + C] 终止。\n")
+    print("提示：按 [Ctrl + F12] 终止。\n")
 
     attach_key = KEY_BINDINGS.get('W', 'w')
     keyboard.on_press_key(attach_key, on_manual_attach)
+    keyboard.add_hotkey('ctrl+f12', lambda: os._exit(0))
 
     cv_thread = threading.Thread(target=visual_monitor_thread, daemon=True)
     cv_thread.start()
