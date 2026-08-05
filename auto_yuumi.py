@@ -5,7 +5,6 @@ import random
 import ctypes
 import threading
 
-import psutil
 import pydirectinput
 import keyboard
 import win32gui
@@ -69,13 +68,13 @@ DISPLAY_NAMES = {
 }
 # 键位循环配置
 ACTION_CONFIG: dict = {
-    'Q': {'start': 35.0, 'end': 5.0, 'delay': 0.0, 'condition': 'none', 'radius': [300, 450]},
-    'E': {'start': 20.0, 'end': 3.0, 'delay': 0.0, 'condition': 'none', 'radius': [0, 10]},
-    'R': {'start': 150.0, 'end': 60.0, 'delay': 480.0, 'condition': 'low_health', 'radius': [50, 150]},
-    'SUMMONER_HEAL': {'start': 200.0, 'end': 60.0, 'delay': 180.0, 'condition': 'low_health', 'radius': [0, 10]},
-    'SUMMONER_EXHAUST': {'start': 20.0, 'end': 5.0, 'delay': 0.0, 'condition': 'none', 'radius': [50, 150]},
-    'WARD_AUX_EQUIP': {'start': 50.0, 'end': 30.0, 'delay': 300.0, 'condition': 'none', 'radius': [60, 120]},
-    'WARD_ACCESSORY': {'start': 100.0, 'end': 50.0, 'delay': 120.0, 'condition': 'none', 'radius': [60, 120]},
+    'Q': {'base_cd': 6.5, 'mana_delay': 30.0, 'delay': 0.0, 'condition': 'none', 'radius': [300, 450]},
+    'E': {'base_cd': 10.0, 'mana_delay': 10.0, 'delay': 0.0, 'condition': 'none', 'radius': [0, 10]},
+    'R': {'base_cd': 120.0, 'delay': 0.0, 'condition': 'low_health', 'radius': [50, 150]},
+    'SUMMONER_HEAL': {'base_cd': 240.0, 'delay': 0.0, 'condition': 'low_health', 'radius': [0, 10]},
+    'SUMMONER_EXHAUST': {'base_cd': 240.0, 'delay': 0.0, 'condition': 'none', 'radius': [50, 150]},
+    'WARD_AUX_EQUIP': {'base_cd': 45.0, 'delay': 600.0, 'condition': 'none', 'radius': [60, 120]},
+    'WARD_ACCESSORY': {'base_cd': 150.0, 'delay': 0.0, 'condition': 'none', 'radius': [60, 120]},
 }
 game_state: dict = {
     'is_running': False,
@@ -112,7 +111,9 @@ game_state: dict = {
     # 记录 Q 技能霸占鼠标的结束时间
     'exclusive_mouse_until': 0.0,
     # 记录当前处于哪一方：'ORDER' (蓝方/左下) 或 'CHAOS' (红方/右上)
-    'team_side': None
+    'team_side': None,
+    # 记录技能极速
+    'abilityHaste': 0.0
 }
 # 高频下路英雄清单 (包含常规ADC与法核)
 COMMON_BOT_CHAMPIONS = [
@@ -299,7 +300,7 @@ def visual_monitor_thread():
     base_w_normal = 112.12
     base_w_attach = 122.0
     base_health_black = 100.0
-    base_shop_bright = 85.0
+    base_shop_bright = 100.0
 
     last_print_time = 0.0
 
@@ -358,6 +359,9 @@ def visual_monitor_thread():
                     # 提取自己当前的等级
                     active_player = data.get('activePlayer', {})
                     read_level = active_player.get('level', 0)
+                    # 提取自己当前的技能极速
+                    champ_stats = active_player.get('championStats', {})
+                    game_state['abilityHaste'] = champ_stats.get('abilityHaste', 0.0)
                     if 0 < read_level <= 18:
                         if game_state['current_level'] == 0:
                             print(f"⚔️ 识别到等级 {read_level}，确认进入游戏！")
@@ -472,9 +476,9 @@ def visual_monitor_thread():
                                 print(f"🎯 锁定跟随目标: [{target_name}] (UI 第 {target_idx + 1} 位) 锁定原因: {target_reason}")
 
 
-                            elif read_level > game_state['current_level']:
-                                game_state['current_level'] = read_level
-                                level_up_skill(read_level)
+                        elif read_level > game_state['current_level']:
+                            game_state['current_level'] = read_level
+                            level_up_skill(read_level)
 
                     if game_state['current_level'] > 0 and game_state['start_time'] is not None:
                         with mss.MSS() as sct:
@@ -594,17 +598,21 @@ def visual_monitor_thread():
                             # 如果没有被暂停，且队友残血，立即进行CD判定并释放
                             if game_state['teammate_low_health'] and not game_state['is_paused'] and not is_in_base:
                                 current_time = time.time()
-                                elapsed = current_time - game_state['start_time']
 
                                 # 遍历所有被定性为“紧急救援”的逻辑动作
                                 for action_name in ['SUMMONER_HEAL', 'R']:
+                                    if action_name == 'R' and game_state['current_level'] < 6:
+                                        continue
+
                                     config = ACTION_CONFIG[action_name]
-                                    start_cd = config['start']
-                                    end_cd = config['end']
-
-                                    # 动态冷却计算 (根据全局配置的起止时间计算)
-                                    current_cd = max(end_cd, start_cd - ((start_cd - end_cd) / TRANSITION_TIME) * elapsed)
-
+                                    base_cd = config['base_cd']
+                                    if action_name == 'R':
+                                        lvl = game_state['current_level']
+                                        base_cd = 120.0 if lvl < 11 else (110.0 if lvl < 16 else 100.0)
+                                    # 动态冷却计算。治疗等召唤师技能不受常规技能极速影响，R受到极速影响
+                                    ah = game_state['abilityHaste']
+                                    current_cd = base_cd if action_name == 'SUMMONER_HEAL' else base_cd * (
+                                                100.0 / (100.0 + ah))
                                     if current_time - game_state['last_cast'][action_name] >= current_cd:
                                         physical_key = KEY_BINDINGS[action_name]
                                         display_name = DISPLAY_NAMES.get(action_name, action_name)
@@ -612,7 +620,7 @@ def visual_monitor_thread():
                                         with mouse_lock:
                                             human_keypress(physical_key)
                                         print(
-                                            f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(冷却: {current_cd:.1f}s)")
+                                            f"[{time.strftime('%H:%M:%S')}] 🚨 [紧急救援] 触发 {display_name}！(当前真实冷却: {current_cd:.1f}s)")
 
                                         game_state['last_cast'][action_name] = current_time
                                         time.sleep(0.1)
@@ -626,11 +634,35 @@ def action_worker(action_name, config, start_offset):
     session_started = False
     last_time = 0.0
     active_start_time = 0.0
-    next_interval = config['start']
     was_paused = False
     physical_key = KEY_BINDINGS.get(action_name, action_name)
     condition = config.get('condition', 'none')
     display_name = f"[{DISPLAY_NAMES.get(action_name, action_name)}] ({str(physical_key).upper()})"
+
+    def get_actual_cd():
+        base_cd = config['base_cd']
+        ah = game_state['abilityHaste']
+        lvl = game_state['current_level']
+        if action_name == 'Q' and lvl < 2:
+            return 9999.0
+        if action_name == 'R':
+            if lvl < 6:
+                return 9999.0
+            elif lvl < 11:
+                base_cd = 120.0
+            elif lvl < 16:
+                base_cd = 110.0
+            else:
+                base_cd = 100.0
+
+        # 特殊处理：召唤师技能和装备饰品不受常规英雄技能极速加成
+        if action_name in ['SUMMONER_HEAL', 'SUMMONER_EXHAUST', 'WARD_AUX_EQUIP', 'WARD_ACCESSORY']:
+            return base_cd
+
+        # 常规英雄技能计算公式
+        return base_cd * (100.0 / (100.0 + ah))
+
+    next_interval = config['base_cd']
 
     while True:
         is_paused_now = game_state['is_paused']
@@ -660,7 +692,10 @@ def action_worker(action_name, config, start_offset):
                     time.sleep(0.5)
                     continue
 
-            # 检查时间间隔
+            # 双重同步验证：防止和紧急救援模块冲突双次释放
+            if action_name in ['SUMMONER_HEAL', 'R']:
+                last_time = max(last_time, game_state['last_cast'][action_name])
+            # CD 检查完毕
             if current_time - last_time >= next_interval:
 
                 # 残血条件判定
@@ -668,7 +703,10 @@ def action_worker(action_name, config, start_offset):
                     # 虽然冷却好了，但队友不残血，憋着不放，睡一小会继续查
                     time.sleep(0.5)
                     continue
-
+                actual_cd = get_actual_cd()
+                if actual_cd == 9999.0:  # 比如不到6级，憋着不放
+                    time.sleep(1.0)
+                    continue
                 # 获取该技能配置的施法距离范围，使用极坐标算法随机计算坐标
                 radius_range = config.get('radius', [0, 80])
                 r = random.uniform(radius_range[0], radius_range[1])
@@ -701,12 +739,20 @@ def action_worker(action_name, config, start_offset):
                 print(msg)
 
                 last_time = time.time()
+                if action_name in ['SUMMONER_HEAL', 'R']:
+                    game_state['last_cast'][action_name] = last_time
                 active_elapsed_time = current_time - active_start_time
-                base_interval = max(
-                    config['end'],
-                    config['start'] - ((config['start'] - config['end']) / TRANSITION_TIME) * active_elapsed_time
-                )
-                next_interval = max(config['end'], random.gauss(base_interval, 0.5))
+                base_mana_delay = config.get('mana_delay', 0.0)
+
+                if base_mana_delay > 0:
+                    # 随着游戏时间推移(TRANSITION_TIME)，额外延迟线性衰减到 0
+                    current_mana_delay = max(0.0, base_mana_delay - (
+                                base_mana_delay / TRANSITION_TIME) * active_elapsed_time)
+                else:
+                    current_mana_delay = 0.0
+
+                # 最终释放间隔 = 面板真实CD + 当前剩余的省蓝额外延迟 + 真人反应手抖
+                next_interval = actual_cd + current_mana_delay + random.uniform(0.1, 0.5)
         else:
             if not game_state['is_running']:
                 session_started = False
