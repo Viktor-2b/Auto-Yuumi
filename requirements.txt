@@ -5,6 +5,7 @@ numpy           # 对应 import numpy
 # 极速截图与 OCR 识别
 mss             # 对应 from mss import mss
 pytesseract     # 对应 import pytesseract
+pillow          # 对应 from PIL import Image, ImageDraw, ImageFont
 
 # Windows 窗口与底层交互
 pywin32         # 对应 import win32gui, win32con
