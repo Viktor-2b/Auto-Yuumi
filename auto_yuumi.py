@@ -298,7 +298,7 @@ def is_game_running():
 
 
 def move_window_to_top_right():
-    """将游戏窗口移动到屏幕右上角"""
+    """将游戏窗口移动到屏幕右上角并聚焦"""
     hwnd = win32gui.FindWindow(None, WINDOW_NAME)
     if hwnd:
         # noinspection PyUnresolvedReferences
@@ -312,6 +312,12 @@ def move_window_to_top_right():
 
         win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, new_x, new_y, win_w, win_h, win32con.SWP_SHOWWINDOW)
         log(f"🪟 已将游戏窗口移动至右上角: ({new_x}, {new_y})")
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(hwnd)
+            log("🪟 已激活并聚焦游戏窗口")
+        except Exception as e:
+            log(f"窗口聚焦失败: {e}", level="warning")
         return True
     return False
 
@@ -483,13 +489,6 @@ def api_monitor_thread():
                         game_state['has_shopped_this_visit'] = True
                         game_state['last_shop_time'] = time.time()
 
-                        with mouse_lock:
-                            human_move(game_state['center_x'], game_state['center_y'])
-                            time.sleep(0.1)
-                            human_click('left')
-                        log("🖱️ 已点击屏幕中心聚焦游戏窗口")
-                        time.sleep(0.5)
-
                         role_x = game_state['client_x'] + int(
                             game_state['client_w'] * (RATIO_ROLE[0] + RATIO_ROLE[2] / 2))
                         role_y = game_state['client_y'] + int(
@@ -498,6 +497,8 @@ def api_monitor_thread():
                             human_move(role_x, role_y)
                             time.sleep(0.1)
                             human_click('left')
+                            time.sleep(0.1)
+                            human_click('left') # 点两次防止未聚焦
                         log("🎯 已自动点击分路任务 (辅助位置)")
 
                         with mouse_lock:
@@ -603,7 +604,7 @@ def visual_monitor_thread():
                     if is_in_base:
                         if not game_state['has_shopped_this_visit'] and (
                                 time.time() - game_state.get('last_shop_time', 0.0) > 30.0):
-                            log(f"🏠 检测到商城点亮(在泉水中)，执行自动购买！")
+                            log(f"🏠 检测到商城点亮(在泉水)，执行自动购买！")
                             game_state['is_paused'] = True
                             game_state['exclusive_mouse_until'] = time.time() + 4.0
                             with mouse_lock:
@@ -641,10 +642,12 @@ def visual_monitor_thread():
                             log(f"⚠️ 附身队友在泉水挂机！执行自动换乘...")
                             game_state['is_paused'] = True
                             game_state['exclusive_mouse_until'] = time.time() + 2.0
+                            game_state['is_simulating_attach'] = True
                             with mouse_lock:
                                 human_move(game_state['center_x'], game_state['center_y'])
                                 time.sleep(0.1)
                                 human_keypress(KEY_BINDINGS['W'])
+                            game_state['is_simulating_attach'] = False
                             time.sleep(0.5)
 
                             new_idx = (game_state['attached_teammate_index'] + 1) % len(game_state['teammate_avatars'])
@@ -670,7 +673,7 @@ def visual_monitor_thread():
                                     time.sleep(0.1)
                                     human_click('right')
                             else:
-                                log(f"🔗 在泉水中，尝试附身队友 {game_state['attached_teammate_index'] + 1} ...")
+                                log(f"🔗 在泉水，尝试附身队友 {game_state['attached_teammate_index'] + 1} ...")
                                 game_state['exclusive_mouse_until'] = current_time + 1.5
                                 game_state['is_simulating_attach'] = True
                                 with mouse_lock:
@@ -724,15 +727,17 @@ def visual_monitor_thread():
                                     human_keypress('b')
                                     log("🌀 已按下 B 键，回城中...")
 
-                                last_recall_time = current_time
+                                last_recall_time = time.time()
                         elif current_time - last_recall_time > 9.0 and not game_state.get('attached_teammate_is_dead'):
                             if current_time - game_state.get('last_auto_attach_time', 0.0) > 5.0:
-                                log(f"🔗 野外游离，尝试附身队友 {game_state['attached_teammate_index'] + 1}...")
+                                log(f"🔗 在野外，尝试附身队友 {game_state['attached_teammate_index'] + 1}...")
                                 game_state['exclusive_mouse_until'] = current_time + 1.5
+                                game_state['is_simulating_attach'] = True
                                 with mouse_lock:
                                     human_move(game_state['attach_x'], game_state['attach_y'])
                                     time.sleep(0.1)
                                     human_keypress(KEY_BINDINGS['W'])
+                                game_state['is_simulating_attach'] = False
                                 game_state['last_auto_attach_time'] = current_time
 
                     # 附身队友血条监控
@@ -761,7 +766,7 @@ def visual_monitor_thread():
                         game_state['attached_teammate_hp_percent'] = current_hp_percent
                 except Exception as e:
                     log(f"视觉线程异常: {e}")
-            time.sleep(0.02)
+            time.sleep(0.01)
 
 
 def action_worker(action_name:str, config, start_offset):
@@ -869,7 +874,7 @@ def action_worker(action_name:str, config, start_offset):
                 if condition == 'hp_low':
                     msg += f" [⚠️残血 {game_state.get('attached_teammate_hp_percent', 1.0) * 100:.1f}% 触发]"
                 elif condition == 'hp_drop':
-                    msg += " [📉掉血触发]"
+                    msg += f" [📉掉血 {game_state.get('attached_teammate_hp_percent', 1.0) * 100:.1f}% 触发]"
                 log(msg)
 
                 last_time = time.time()
@@ -889,7 +894,7 @@ def action_worker(action_name:str, config, start_offset):
             if not game_state['is_running']:
                 session_started = False
 
-        time.sleep(0.05)
+        time.sleep(0.01)
 
 
 def idle_mouse_worker():
@@ -1020,7 +1025,3 @@ def main_controller():
 
 if __name__ == "__main__":
     main_controller()
-# TODO
-# 1.死亡时，附身改为移动等待,移动到队友复活
-# 2.虚弱范围内目标检测
-# 3.队友0-5的时候，找全队最高kd的上车
