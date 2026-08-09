@@ -150,6 +150,10 @@ game_state: dict = {
     'team_side': None,
     # 记录技能极速
     'ability_haste': 0.0,
+
+    # 存储敌人坐标与检测时间
+    'enemy_positions': [],
+    'last_enemy_track_time': 0.0,
 }
 # 高频下路英雄清单 (包含常规ADC与法核)
 COMMON_BOT_CHAMPIONS = [
@@ -422,6 +426,32 @@ def level_up_skill(target_level):
     log(f"🔼 升级啦！当前等级 {target_level}，自动加点: {display_name}")
 
 
+def get_enemy_positions(img_bgr, win_w, win_h):
+    """敌人血条检测"""
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+
+    lower_red1, upper_red1 = np.array([0, 150, 100]), np.array([10, 255, 255])
+    lower_red2, upper_red2 = np.array([170, 150, 100]), np.array([180, 255, 255])
+
+    mask = cv2.inRange(hsv, lower_red1, upper_red1) + cv2.inRange(hsv, lower_red2, upper_red2)
+    kernel = np.ones((max(1, int(win_h * 0.005)), max(1, int(win_w * 0.02))), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    targets = []
+
+    min_w, full_w, full_h = int(win_w * 0.025), int(win_w * 0.125), int(win_h * 0.027)
+    y_offset = int(win_h * 0.08)
+
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if abs(h - full_h) > 3 or w < min_w or w > full_w:
+            continue
+        targets.append((x + full_w // 2, y + full_h + y_offset))
+
+    return targets
+
+
 def api_monitor_thread():
     """API 数据监控线程"""
     while True:
@@ -570,7 +600,7 @@ def visual_monitor_thread():
     """视觉识别线程"""
     # 动态校准常量基准
     base_w_normal, base_w_attach = 112.12, 122.0
-    base_hp_threshold, base_shop_bright = 40.0, 100.0
+    base_hp_threshold, base_shop_bright = 40.0, 85.0
 
     in_base_start_time = 0.0
     last_recall_time = 0.0
@@ -764,6 +794,27 @@ def visual_monitor_thread():
                         if last_hp - current_hp_percent > 0.05:
                             game_state['last_hp_drop_time'] = time.time()
                         game_state['attached_teammate_hp_percent'] = current_hp_percent
+
+                    if not game_state['is_paused'] and current_time - game_state.get('last_enemy_track_time',
+                                                                                     0.0) > 0.1:
+                        client_monitor = {
+                            'top': game_state['client_y'],
+                            'left': game_state['client_x'],
+                            'width': game_state['client_w'],
+                            'height': game_state['client_h']
+                        }
+                        client_img = np.array(sct.grab(client_monitor))
+                        client_bgr = cv2.cvtColor(client_img, cv2.COLOR_BGRA2BGR)
+                        raw_targets = get_enemy_positions(client_bgr, game_state['client_w'], game_state['client_h'])
+
+                        # 将相对坐标转换为绝对屏幕坐标，并按距离自己的远近排序
+                        global_targets = [(game_state['client_x'] + tx, game_state['client_y'] + ty) for tx, ty in
+                                          raw_targets]
+                        global_targets.sort(
+                            key=lambda t: math.hypot(t[0] - game_state['center_x'], t[1] - game_state['center_y']))
+
+                        game_state['enemy_positions'] = global_targets
+                        game_state['last_enemy_track_time'] = current_time
                 except Exception as e:
                     log(f"视觉线程异常: {e}")
             time.sleep(0.01)
@@ -802,23 +853,19 @@ def action_worker(action_name:str, config, start_offset):
         # 常规英雄技能计算公式
         return base_cd * (100.0 / (100.0 + ah))
 
-    next_interval = config['base_cd']
-
     while True:
         # 检查互斥锁
-        if time.time() < game_state.get('exclusive_mouse_until', 0.0):
+        if time.time() < game_state.get('exclusive_mouse_until', 0.0) and action_name != 'Q':
             time.sleep(0.1)
             continue
 
         if game_state['is_running'] and not game_state['is_paused'] and game_state['current_level'] > 0:
             current_time = time.time()
-            global_elapsed_time = current_time - game_state['start_time']
 
             if not session_started:
-                if global_elapsed_time >= (config.get('delay', 0.0) + start_offset):
-                    last_time = current_time
+                if current_time - game_state['start_time'] >= (config.get('delay', 0.0) + start_offset):
+                    last_time = current_time - 9999.0
                     active_start_time = current_time
-                    next_interval = random.uniform(1.0, 3.0)
                     session_started = True
                     log(f"⏳ {display_name} 达到启动时间！")
                 else:
@@ -826,70 +873,98 @@ def action_worker(action_name:str, config, start_offset):
                     continue
 
             # CD 检查
-            if current_time - last_time >= next_interval:
-                # 残血条件
-                if condition == 'hp_low' and game_state.get('attached_teammate_hp_percent', 1.0) >= 0.60:
-                    time.sleep(0.1)
-                    continue
+            actual_cd = get_actual_cd()
+            if actual_cd == 9999.0:
+                time.sleep(1.0)
+                continue
+            if current_time - last_time < actual_cd:
+                time.sleep(0.1)
+                continue
 
-                # 掉血条件
-                if condition == 'hp_drop' and (current_time - game_state.get('last_hp_drop_time', 0.0) > 1.0):
-                    time.sleep(0.1)
-                    continue
+            # 触发条件
+            triggered = False
+            target_x, target_y = None, None
+            enemies = game_state.get('enemy_positions', [])
 
-                actual_cd = get_actual_cd()
-                if actual_cd == 9999.0:
-                    time.sleep(1.0)
-                    continue
+            if condition == 'hp_low': # 残血条件
+                if game_state.get('attached_teammate_hp_percent', 1.0) < 0.60:
+                    triggered = True
 
-                radius_range = config.get('radius')
-                # 如果配置了 radius，说明是范围技能，先移动鼠标
-                if radius_range is not None:
-                    r = random.uniform(radius_range[0], radius_range[1])
-                    # 根据阵营智能设定poke型技能攻击象限
-                    if config.get('is_poke'):
-                        if game_state['team_side'] == 'ORDER':
-                            theta = random.uniform(-math.pi / 2, 0)
-                        else:
-                            theta = random.uniform(math.pi / 2, math.pi)
-                    else:
-                        theta = random.uniform(0, 2 * math.pi)
+            elif condition == 'hp_drop': # 掉血条件
+                if current_time - game_state.get('last_hp_drop_time', 0.0) <= 1.0:
+                    triggered = True
+            elif action_name == 'Q':
+                if enemies:
+                    triggered = True
+                    target_x, target_y = enemies[0]  # 锁定最近的敌人
+            elif action_name == 'SUMMONER_EXHAUST':
+                # 虚弱判断：遍历所有敌人，只要有进入屏幕 450 像素距离内的就触发
+                for ex, ey in enemies:
+                    if math.hypot(ex - game_state['center_x'], ey - game_state['center_y']) <= 450:
+                        triggered = True
+                        target_x, target_y = ex, ey
+                        break
+            else:
+                triggered = True
 
-                    rx = int(game_state['center_x'] + r * math.cos(theta))
-                    ry = int(game_state['center_y'] + r * math.sin(theta))
 
-                    game_state['exclusive_mouse_until'] = current_time + 1.5
+            # 满足条件后施法
+            if triggered:
+                if action_name == 'Q':
+                    game_state['exclusive_mouse_until'] = current_time + 2.2  # 锁死鼠标防干扰
+                    log(f"🎯 发现敌人，触发 {display_name} 并开始制导！")
                     with mouse_lock:
-                        human_move(rx, ry, safe_zone=True)
+                        human_move(target_x, target_y, safe_zone=True)
                         time.sleep(0.05)
                         human_keypress(physical_key)
 
-                    if action_name == 'Q':  # Q 技能需要额外引导时间，锁死鼠标 2 秒
-                        game_state['exclusive_mouse_until'] = time.time() + 2.0
-                else:
+                    # Q技能专属：2秒内强制鼠标追踪敌人
+                    guide_end = time.time() + 2.0
+                    while time.time() < guide_end:
+                        current_enemies = game_state.get('enemy_positions', [])
+                        if current_enemies:
+                            ex, ey = current_enemies[0]
+                            with mouse_lock:
+                                # 导弹制导要求快狠准，不需要仿生平滑
+                                pydirectinput.moveTo(ex, ey)
+                        time.sleep(0.03)  # 高频修正坐标
+
+                elif action_name == 'SUMMONER_EXHAUST':
+                    game_state['exclusive_mouse_until'] = current_time + 1.0
+                    log(f"⚠️ 敌人贴脸！紧急触发 {display_name}！")
                     with mouse_lock:
+                        human_move(target_x, target_y, safe_zone=True)
+                        time.sleep(0.05)
                         human_keypress(physical_key)
 
-                msg = f"触发 {display_name} (距上次 {next_interval:.2f}s)"
-                if condition == 'hp_low':
-                    msg += f" [⚠️残血 {game_state.get('attached_teammate_hp_percent', 1.0) * 100:.1f}% 触发]"
-                elif condition == 'hp_drop':
-                    msg += f" [📉掉血 {game_state.get('attached_teammate_hp_percent', 1.0) * 100:.1f}% 触发]"
-                log(msg)
+                else:
+                    # R技能与眼位：保留原生随机/方向逻辑。如果 R 遇到敌人，会向敌人方向释放。
+                    radius_range = config.get('radius')
+                    if radius_range is not None:
+                        if config.get('is_poke') and enemies:
+                            tx, ty = enemies[0]  # R 追踪敌人
+                        else:
+                            r = random.uniform(radius_range[0], radius_range[1])
+                            if config.get('is_poke'):
+                                theta = random.uniform(-math.pi / 2, 0) if game_state[
+                                                                               'team_side'] == 'ORDER' else random.uniform(
+                                    math.pi / 2, math.pi)
+                            else:
+                                theta = random.uniform(0, 2 * math.pi)
+                            tx = int(game_state['center_x'] + r * math.cos(theta))
+                            ty = int(game_state['center_y'] + r * math.sin(theta))
+
+                        game_state['exclusive_mouse_until'] = current_time + 1.0
+                        with mouse_lock:
+                            human_move(tx, ty, safe_zone=True)
+                            time.sleep(0.05)
+                            human_keypress(physical_key)
+                    else:
+                        with mouse_lock:
+                            human_keypress(physical_key)
+                    log(f"✅ 条件触发 {display_name}")
 
                 last_time = time.time()
-
-                # 计算省蓝额外cd
-                active_elapsed_time = current_time - active_start_time
-                base_mana_delay = config.get('mana_delay', 0.0)
-                if base_mana_delay > 0:
-                    current_mana_delay = max(0.0, base_mana_delay - (
-                            base_mana_delay / TRANSITION_TIME) * active_elapsed_time)
-                else:
-                    current_mana_delay = 0.0
-
-                # 最终释放间隔 = 面板真实CD + 省蓝额外cd + 真人反应手抖
-                next_interval = actual_cd + current_mana_delay + random.uniform(0.1, 0.5)
         else:
             if not game_state['is_running']:
                 session_started = False
