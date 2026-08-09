@@ -109,7 +109,23 @@ def main():
                 tl = (top_left_x, top_left_y)
                 br = (top_left_x + int(win_w * r_width), top_left_y + int(win_h * r_height))
                 display_text = "测试区域"
+                roi = np.asarray(sct_img)[tl[1]:br[1], tl[0]:br[0]]
+                if roi.size > 0:
+                    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGRA2GRAY)
+                    # 1. 计算区域整体平均灰度
+                    mean_val = np.mean(roi_gray)
+                    # 2. 计算区域最中间一行的特征（用于血条判断）
+                    mid_row = roi_gray[roi_gray.shape[0] // 2, :]
 
+                    print(f"📊 区域阈值采样分析结果:")
+                    print(f"   - 区域平均灰度 (对照 W技能/商城 base 初始值): {mean_val:.2f}")
+                    print(f"   - 中心行最高灰度 (对照血条 base_hp_threshold): {np.max(mid_row)}")
+                    print(f"   - 中心行平均灰度: {np.mean(mid_row):.2f}\n")
+
+                    # 将均值也绘制在生成的预览图上方便查看
+                    display_text = f"均值: {mean_val:.1f} | 峰值: {np.max(mid_row)}"
+                else:
+                    display_text = "测试区域(越界)"
             # 绘制并覆盖
             img = draw_transparent_rect_with_text(img, tl, br, display_text)
 
